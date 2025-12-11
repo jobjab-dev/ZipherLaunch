@@ -1,0 +1,24 @@
+{
+    "name": "cipherlaunch-monorepo",
+    "version": "1.0.0",
+    "description": "CipherLaunch - Confidential Token Launchpad & Private Auctions powered by FHE",
+    "private": true,
+    "scripts": {
+        "install:all": "npm install --prefix contracts && npm install --prefix app",
+        "chain": "npm run chain --prefix contracts",
+        "compile": "npm run compile --prefix contracts",
+        "test": "npm run test --prefix contracts",
+        "export-abi": "npm run export-abi --prefix contracts",
+        "deploy:local": "npm run deploy:local --prefix contracts",
+        "deploy:sepolia": "npm run deploy:sepolia --prefix contracts",
+        "verify:all": "npm run verify:all --prefix contracts",
+        "dev": "npm run dev --prefix app",
+        "build": "npm run build --prefix app",
+        "clean": "npx rimraf contracts/artifacts contracts/cache contracts/typechain-types app/.next",
+        "clean:contracts": "npm run clean --prefix contracts",
+        "clean:app": "npx rimraf app/.next"
+    },
+    "devDependencies": {
+        "rimraf": "^5.0.0"
+    }
+}
