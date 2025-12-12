@@ -13,13 +13,17 @@ contract ConfidentialERC20 is ERC20 {
     function mintPublic(address to, uint64 amount) public {
         _mint(to, amount);
         euint64 encAmount = FHE.asEuint64(amount);
-        _encBalances[to] = FHE.add(_encBalances[to], encAmount);
+        euint64 newBalance = FHE.add(_encBalances[to], encAmount);
+        _encBalances[to] = newBalance;
+        FHE.allow(newBalance, to);
     }
     
     function shield(uint64 amount) public {
         transferFrom(msg.sender, address(this), amount);
         euint64 encAmount = FHE.asEuint64(amount);
-        _encBalances[msg.sender] = FHE.add(_encBalances[msg.sender], encAmount);
+        euint64 newBalance = FHE.add(_encBalances[msg.sender], encAmount);
+        _encBalances[msg.sender] = newBalance;
+        FHE.allow(newBalance, msg.sender);
     }
 
     function transferEncrypted(address to, euint64 encryptedAmount) public {
@@ -31,6 +35,9 @@ contract ConfidentialERC20 is ERC20 {
         
         _encBalances[msg.sender] = FHE.select(canTransfer, newSenderBal, userBalance);
         _encBalances[to] = FHE.select(canTransfer, newToBal, _encBalances[to]);
+
+        FHE.allow(_encBalances[msg.sender], msg.sender);
+        FHE.allow(_encBalances[to], to);
     }
 
     function approveEncrypted(address spender, euint64 amount) public {
@@ -53,6 +60,9 @@ contract ConfidentialERC20 is ERC20 {
         
         _encBalances[from] = FHE.select(canTransfer, newFromBal, fromBalance);
         _encBalances[to] = FHE.select(canTransfer, newToBal, _encBalances[to]);
+
+        FHE.allow(_encBalances[from], from);
+        FHE.allow(_encBalances[to], to);
     }
     
     function balanceOfEncrypted(address user) public view returns (euint64) {

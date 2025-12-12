@@ -1,9 +1,10 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract } from 'wagmi';
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract, useWalletClient } from 'wagmi';
 import { parseUnits, formatUnits } from 'viem';
+import { useFhevm } from '../components/FhevmProvider';
 import ScrambleText from '../components/ScrambleText';
 import { useToast } from '../components/Toast';
 
@@ -32,13 +33,6 @@ const ERC20_ABI = [
     {
         "inputs": [],
         "name": "symbol",
-        "outputs": [{ "name": "", "type": "string" }],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "name",
         "outputs": [{ "name": "", "type": "string" }],
         "stateMutability": "view",
         "type": "function"
@@ -79,8 +73,8 @@ const WRAPPER_ABI = [
     },
     {
         "inputs": [{ "name": "account", "type": "address" }],
-        "name": "balanceOf",
-        "outputs": [{ "name": "", "type": "uint256" }],
+        "name": "confidentialBalanceOf",
+        "outputs": [{ "name": "", "type": "bytes32" }],
         "stateMutability": "view",
         "type": "function"
     }
@@ -91,15 +85,22 @@ const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string
 
 export default function WrapPage() {
     const { address, isConnected } = useAccount();
+    const { data: walletClient } = useWalletClient();
+    const { isInitialized: isFhevmReady, status: fhevmStatus, instance } = useFhevm();
     const { encrypt, decrypt, toast } = useToast();
 
     const [mode, setMode] = useState<'wrap' | 'unwrap'>('wrap');
-    const [tokenAddress, setTokenAddress] = useState(SAMPLE_TOKEN || '');
+    const [tokenAddress, setTokenAddress] = useState<`0x${string}`>(SAMPLE_TOKEN || '0x');
     const [amount, setAmount] = useState('');
     const [approvalDone, setApprovalDone] = useState(false);
     const [currentAction, setCurrentAction] = useState<'create' | 'approve' | 'wrap' | 'unwrap' | null>(null);
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
     const [successState, setSuccessState] = useState(false);
+
+    // Decryption state
+    const [decryptedBalance, setDecryptedBalance] = useState<string | null>(null);
+    const [isDecryptingBalance, setIsDecryptingBalance] = useState(false);
+    const [decryptError, setDecryptError] = useState<string | null>(null);
 
     const { data: hash, isPending, writeContract, reset } = useWriteContract();
     const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
@@ -109,13 +110,13 @@ export default function WrapPage() {
         address: WRAPPER_FACTORY_ADDRESS,
         abi: WRAPPER_FACTORY_ABI,
         functionName: 'getWrapper',
-        args: [tokenAddress as `0x${string}`],
+        args: [tokenAddress],
         query: { enabled: !!tokenAddress && tokenAddress.length === 42 }
     });
 
-    // Get public token info
+    // Get public token balance
     const { data: balance, refetch: refetchBalance } = useReadContract({
-        address: tokenAddress as `0x${string}`,
+        address: tokenAddress,
         abi: ERC20_ABI,
         functionName: 'balanceOf',
         args: [address!],
@@ -123,37 +124,147 @@ export default function WrapPage() {
     });
 
     const { data: decimals } = useReadContract({
-        address: tokenAddress as `0x${string}`,
+        address: tokenAddress,
         abi: ERC20_ABI,
         functionName: 'decimals',
         query: { enabled: !!tokenAddress && tokenAddress.length === 42 }
     });
 
     const { data: symbol } = useReadContract({
-        address: tokenAddress as `0x${string}`,
+        address: tokenAddress,
         abi: ERC20_ABI,
         functionName: 'symbol',
         query: { enabled: !!tokenAddress && tokenAddress.length === 42 }
     });
 
-    // Get wrapped token balance
-    const { data: wrappedBalance, refetch: refetchWrappedBalance } = useReadContract({
+    // Get encrypted balance handle
+    const { data: encryptedBalanceHandle, refetch: refetchEncrypted } = useReadContract({
         address: wrapperAddress as `0x${string}`,
         abi: WRAPPER_ABI,
-        functionName: 'balanceOf',
+        functionName: 'confidentialBalanceOf',
         args: [address!],
         query: { enabled: !!address && !!wrapperAddress && wrapperAddress !== '0x0000000000000000000000000000000000000000' }
     });
 
     const hasWrapper = wrapperAddress && wrapperAddress !== '0x0000000000000000000000000000000000000000';
+    const hasEncryptedBalance = encryptedBalanceHandle && encryptedBalanceHandle !== '0x0000000000000000000000000000000000000000000000000000000000000000';
 
-    // Handle encryption animation
+    // Debug logging
+    useEffect(() => {
+        console.log('🔍 Debug balance info:');
+        console.log('   wrapperAddress:', wrapperAddress);
+        console.log('   hasWrapper:', hasWrapper);
+        console.log('   encryptedBalanceHandle:', encryptedBalanceHandle);
+        console.log('   hasEncryptedBalance:', hasEncryptedBalance);
+        console.log('   address:', address);
+    }, [wrapperAddress, encryptedBalanceHandle, address, hasWrapper, hasEncryptedBalance]);
+
+    // Adapter: wagmi walletClient -> ethers-like signer
+    const signer = useMemo(() => {
+        if (!walletClient) return null;
+        return {
+            getAddress: async () => walletClient.account.address,
+            signTypedData: async (domain: any, types: any, message: any) => {
+                return walletClient.signTypedData({
+                    domain,
+                    types,
+                    primaryType: Object.keys(types)[0],
+                    message
+                });
+            }
+        };
+    }, [walletClient]);
+
+    // Decrypt balance function using @zama-fhe/relayer-sdk
+    const handleDecryptBalance = useCallback(async () => {
+        if (!isFhevmReady || !hasEncryptedBalance || !signer || !wrapperAddress || !instance) {
+            toast({ type: 'error', title: 'Not Ready', message: `FHEVM Status: ${fhevmStatus}` });
+            return;
+        }
+
+        setIsDecryptingBalance(true);
+        setDecryptError(null);
+
+        try {
+            // Step 1: Generate keypair using SDK instance
+            const keypair = instance.generateKeypair();
+
+            // Step 2: Create EIP-712 message (following fhevm-example-hub pattern)
+            const startTimestamp = Math.floor(Date.now() / 1000);
+            const durationDays = 365;
+
+            const eip712 = instance.createEIP712(
+                keypair.publicKey,
+                [wrapperAddress as `0x${string}`],
+                startTimestamp,
+                durationDays
+            );
+
+            // Step 3: Sign with wallet
+            toast({ type: 'info', title: 'Sign Required', message: 'Please sign the decryption request in your wallet' });
+
+            const signatureString = await signer.signTypedData(
+                eip712.domain,
+                { UserDecryptRequestVerification: eip712.types.UserDecryptRequestVerification },
+                eip712.message
+            );
+            const userAddress = await signer.getAddress();
+
+            // Step 4: Request decryption using relayer-sdk instance.userDecrypt
+            toast({ type: 'info', title: 'Decrypting...', message: 'Requesting decryption from KMS...' });
+
+            const requests = [{
+                handle: encryptedBalanceHandle as string,
+                contractAddress: wrapperAddress as `0x${string}`
+            }];
+
+            const result = await instance.userDecrypt(
+                requests,
+                keypair.privateKey,
+                keypair.publicKey,
+                signatureString,
+                [wrapperAddress as `0x${string}`],
+                userAddress,
+                startTimestamp,
+                durationDays
+            );
+
+            // Step 5: Format result
+            console.log('🔍 Decryption result:', result);
+            console.log('🔍 Handle key:', encryptedBalanceHandle);
+            console.log('🔍 Result keys:', Object.keys(result));
+
+            const value = (result as Record<string, bigint | boolean | `0x${string}` | undefined>)[encryptedBalanceHandle as string];
+            console.log('🔍 Value for handle:', value, 'type:', typeof value);
+
+            if (value !== undefined) {
+                // ERC7984 uses 6 decimals (not the underlying ERC20's decimals!)
+                const ERC7984_DECIMALS = 6;
+                const formatted = Number(formatUnits(BigInt(String(value)), ERC7984_DECIMALS)).toLocaleString();
+                console.log('🔍 Formatted value:', formatted);
+                setDecryptedBalance(formatted);
+                toast({ type: 'success', title: 'Balance Decrypted!', message: `Your c${String(symbol)} balance: ${formatted}` });
+            } else {
+                setDecryptedBalance('0');
+            }
+        } catch (error: unknown) {
+            console.error('Decrypt error:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Decryption failed';
+            setDecryptError(errorMessage);
+            toast({ type: 'error', title: 'Decrypt Failed', message: errorMessage });
+        } finally {
+            setIsDecryptingBalance(false);
+        }
+    }, [isFhevmReady, hasEncryptedBalance, signer, wrapperAddress, encryptedBalanceHandle, decimals, symbol, toast, fhevmStatus, instance]);
+
+
+    // Handle transaction states
     useEffect(() => {
         if (isPending && !encryptToastId && currentAction) {
             const actionText = currentAction === 'create' ? 'CREATING WRAPPER...'
                 : currentAction === 'approve' ? 'APPROVING...'
-                    : currentAction === 'wrap' ? 'WRAPPING...'
-                        : 'UNWRAPPING...';
+                    : currentAction === 'wrap' ? 'SHIELDING...'
+                        : 'UNSHIELDING...';
             const id = encrypt(actionText, 'Waiting for wallet confirmation');
             setEncryptToastId(id);
         }
@@ -174,21 +285,23 @@ export default function WrapPage() {
                 refetchWrapper();
                 toast({ type: 'success', title: 'Wrapper Created', message: 'Proceed to approve tokens', duration: 6000 });
             } else if (currentAction === 'approve') {
-                decrypt(encryptToastId, true, '✓ APPROVAL SUCCESS!', 'Now wrap tokens');
+                decrypt(encryptToastId, true, '✓ APPROVAL SUCCESS!', 'Now shield tokens');
                 setApprovalDone(true);
-                toast({ type: 'success', title: 'Approval Confirmed', message: 'You can now wrap tokens', duration: 6000 });
+                toast({ type: 'success', title: 'Approval Confirmed', message: 'You can now shield tokens', duration: 6000 });
             } else if (currentAction === 'wrap') {
-                decrypt(encryptToastId, true, '✓ TOKENS WRAPPED!', 'Confidential balance updated');
+                decrypt(encryptToastId, true, '✓ TOKENS SHIELDED!', 'Confidential balance updated');
                 setSuccessState(true);
+                setDecryptedBalance(null); // Reset to trigger re-decrypt
                 refetchBalance();
-                refetchWrappedBalance();
-                toast({ type: 'success', title: 'Wrapped!', message: `${amount} ${String(symbol)} → c${String(symbol)}`, duration: 8000 });
+                refetchEncrypted();
+                toast({ type: 'success', title: 'Shielded!', message: `${amount} ${String(symbol)} → c${String(symbol)}`, duration: 8000 });
             } else if (currentAction === 'unwrap') {
-                decrypt(encryptToastId, true, '✓ TOKENS UNWRAPPED!', 'Public balance updated');
+                decrypt(encryptToastId, true, '✓ TOKENS UNSHIELDED!', 'Public balance updated');
                 setSuccessState(true);
+                setDecryptedBalance(null);
                 refetchBalance();
-                refetchWrappedBalance();
-                toast({ type: 'success', title: 'Unwrapped!', message: `${amount} c${String(symbol)} → ${String(symbol)}`, duration: 8000 });
+                refetchEncrypted();
+                toast({ type: 'success', title: 'Unshielded!', message: `${amount} c${String(symbol)} → ${String(symbol)}`, duration: 8000 });
             }
             setEncryptToastId(null);
             setCurrentAction(null);
@@ -202,7 +315,7 @@ export default function WrapPage() {
             address: WRAPPER_FACTORY_ADDRESS,
             abi: WRAPPER_FACTORY_ABI,
             functionName: 'createWrapper',
-            args: [tokenAddress as `0x${string}`]
+            args: [tokenAddress]
         });
     };
 
@@ -211,7 +324,7 @@ export default function WrapPage() {
         setCurrentAction('approve');
         const amountWei = parseUnits(amount, Number(decimals));
         writeContract({
-            address: tokenAddress as `0x${string}`,
+            address: tokenAddress,
             abi: ERC20_ABI,
             functionName: 'approve',
             args: [wrapperAddress, amountWei]
@@ -296,7 +409,7 @@ export default function WrapPage() {
                                 fontSize: '14px'
                             }}
                         >
-                            🔒 WRAP
+                            🔒 SHIELD
                         </button>
                         <button
                             onClick={() => { setMode('unwrap'); handleReset(); }}
@@ -311,7 +424,7 @@ export default function WrapPage() {
                                 fontSize: '14px'
                             }}
                         >
-                            🔓 UNWRAP
+                            🔓 UNSHIELD
                         </button>
                     </div>
 
@@ -321,13 +434,28 @@ export default function WrapPage() {
                         marginBottom: '8px',
                         textTransform: 'uppercase'
                     }}>
-                        <span className="text-gold">{mode === 'wrap' ? 'Wrap' : 'Unwrap'}</span> Token
+                        <span className="text-gold">{mode === 'wrap' ? 'Shield' : 'Unshield'}</span> Token
                     </h1>
                     <p style={{ color: '#666', marginBottom: '24px', fontSize: '13px' }}>
                         {mode === 'wrap'
                             ? 'Convert public ERC20 → Confidential ERC7984'
                             : 'Convert Confidential ERC7984 → Public ERC20'}
                     </p>
+
+                    {/* FHEVM Status */}
+                    {!isFhevmReady && (
+                        <div style={{
+                            padding: '8px 12px',
+                            background: 'rgba(255, 165, 0, 0.1)',
+                            border: '1px solid rgba(255, 165, 0, 0.3)',
+                            borderRadius: '6px',
+                            marginBottom: '16px',
+                            fontSize: '11px',
+                            color: '#FFA500'
+                        }}>
+                            🔄 FHEVM SDK: {fhevmStatus}...
+                        </div>
+                    )}
 
                     {!successState ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -339,7 +467,7 @@ export default function WrapPage() {
                                 <input
                                     type="text"
                                     value={tokenAddress}
-                                    onChange={e => { setTokenAddress(e.target.value); setApprovalDone(false); }}
+                                    onChange={e => { setTokenAddress(e.target.value as `0x${string}`); setApprovalDone(false); setDecryptedBalance(null); }}
                                     placeholder="0x..."
                                     className="cyber-input"
                                     style={{ width: '100%', padding: '12px', borderRadius: '8px', fontSize: '13px', fontFamily: 'monospace' }}
@@ -350,7 +478,7 @@ export default function WrapPage() {
                                 </p>
                             </div>
 
-                            {/* Balances */}
+                            {/* Balances Display */}
                             {symbol && hasWrapper && (
                                 <div style={{
                                     display: 'grid',
@@ -369,14 +497,40 @@ export default function WrapPage() {
                                     </div>
                                     <div>
                                         <div style={{ fontSize: '10px', color: '#888' }}>c{String(symbol)} (Private)</div>
-                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: mode === 'unwrap' ? 'var(--gold-primary)' : '#888' }}>
-                                            {wrappedBalance !== undefined && decimals ? Number(formatUnits(wrappedBalance as bigint, Number(decimals))).toLocaleString() : '0'}
-                                        </div>
+                                        {decryptedBalance !== null ? (
+                                            <div style={{ fontSize: '16px', fontWeight: 'bold', color: mode === 'unwrap' ? 'var(--gold-primary)' : '#888' }}>
+                                                {decryptedBalance}
+                                            </div>
+                                        ) : hasEncryptedBalance ? (
+                                            <button
+                                                onClick={handleDecryptBalance}
+                                                disabled={isDecryptingBalance || !isFhevmReady || !signer}
+                                                style={{
+                                                    background: 'transparent',
+                                                    border: '1px solid var(--gold-primary)',
+                                                    color: 'var(--gold-primary)',
+                                                    padding: '4px 10px',
+                                                    borderRadius: '4px',
+                                                    fontSize: '12px',
+                                                    cursor: isDecryptingBalance ? 'wait' : 'pointer',
+                                                    opacity: isDecryptingBalance ? 0.6 : 1
+                                                }}
+                                            >
+                                                {isDecryptingBalance ? '🔓 Decrypting...' : '🔓 Decrypt'}
+                                            </button>
+                                        ) : (
+                                            <div style={{ fontSize: '14px', color: '#666' }}>0</div>
+                                        )}
+                                        {decryptError && (
+                                            <div style={{ fontSize: '10px', color: '#f44', marginTop: '4px' }}>
+                                                {decryptError}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             )}
 
-                            {/* Wrapper Status */}
+                            {/* No Wrapper Warning */}
                             {symbol && !hasWrapper && (
                                 <div style={{
                                     padding: '16px',
@@ -398,9 +552,7 @@ export default function WrapPage() {
                                     >
                                         {isPending && currentAction === 'create' ? (
                                             <ScrambleText text="CREATING..." trigger={true} className="text-gold" />
-                                        ) : (
-                                            '🔐 CREATE WRAPPER'
-                                        )}
+                                        ) : '🔐 CREATE WRAPPER'}
                                     </button>
                                 </div>
                             )}
@@ -424,7 +576,7 @@ export default function WrapPage() {
                             {hasWrapper && (
                                 <div>
                                     <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '6px' }}>
-                                        AMOUNT TO {mode.toUpperCase()}
+                                        AMOUNT TO {mode === 'wrap' ? 'SHIELD' : 'UNSHIELD'}
                                     </label>
                                     <input
                                         type="number"
@@ -473,7 +625,7 @@ export default function WrapPage() {
                                             >
                                                 {isPending && currentAction === 'wrap' ? (
                                                     <ScrambleText text="..." trigger={true} className="text-gold" />
-                                                ) : '2. WRAP'}
+                                                ) : '2. SHIELD'}
                                             </button>
                                         </>
                                     ) : (
@@ -484,8 +636,8 @@ export default function WrapPage() {
                                             style={{ width: '100%', padding: '16px' }}
                                         >
                                             {isPending && currentAction === 'unwrap' ? (
-                                                <ScrambleText text="UNWRAPPING..." trigger={true} className="text-gold" />
-                                            ) : '🔓 UNWRAP'}
+                                                <ScrambleText text="UNSHIELDING..." trigger={true} className="text-gold" />
+                                            ) : '🔓 UNSHIELD'}
                                         </button>
                                     )}
                                 </div>
@@ -493,7 +645,7 @@ export default function WrapPage() {
 
                             {!isConnected && (
                                 <div style={{ textAlign: 'center', color: '#666', fontSize: '13px', padding: '16px' }}>
-                                    Connect wallet to {mode} tokens
+                                    Connect wallet to {mode === 'wrap' ? 'shield' : 'unshield'} tokens
                                 </div>
                             )}
                         </div>
@@ -510,7 +662,7 @@ export default function WrapPage() {
                                 {mode === 'wrap' ? '🔒' : '🔓'}
                             </div>
                             <div style={{ color: '#00FF64', fontWeight: 'bold', fontSize: '16px', marginBottom: '8px' }}>
-                                {mode === 'wrap' ? 'TOKENS WRAPPED!' : 'TOKENS UNWRAPPED!'}
+                                {mode === 'wrap' ? 'TOKENS SHIELDED!' : 'TOKENS UNSHIELDED!'}
                             </div>
                             <div style={{ color: '#888', marginBottom: '16px', fontSize: '13px' }}>
                                 {mode === 'wrap'
@@ -522,7 +674,7 @@ export default function WrapPage() {
                                 className="cyber-button"
                                 style={{ padding: '12px 24px' }}
                             >
-                                {mode === 'wrap' ? 'WRAP MORE' : 'UNWRAP MORE'}
+                                {mode === 'wrap' ? 'SHIELD MORE' : 'UNSHIELD MORE'}
                             </button>
                         </div>
                     )}

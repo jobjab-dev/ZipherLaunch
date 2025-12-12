@@ -1,5 +1,5 @@
 'use client';
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
 interface Toast {
@@ -29,7 +29,7 @@ function ScrambleEffect({ text }: { text: string }) {
     const chars = '!@#$%^&*()_+{}[]|;:,.<>?/~`0123456789ABCDEF';
     const [display, setDisplay] = useState(text);
 
-    useState(() => {
+    useEffect(() => {
         let frame = 0;
         const maxFrames = 20;
         const interval = setInterval(() => {
@@ -45,7 +45,7 @@ function ScrambleEffect({ text }: { text: string }) {
             frame++;
         }, 50);
         return () => clearInterval(interval);
-    });
+    }, [text]);
 
     return <span style={{ fontFamily: 'monospace' }}>{display}</span>;
 }
@@ -53,7 +53,7 @@ function ScrambleEffect({ text }: { text: string }) {
 function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: () => void }) {
     const [isRemoving, setIsRemoving] = useState(false);
 
-    useState(() => {
+    useEffect(() => {
         if (toast.type !== 'encrypting' && toast.duration !== 0) {
             const timer = setTimeout(() => {
                 setIsRemoving(true);
@@ -61,7 +61,7 @@ function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: () => void }) 
             }, toast.duration || 5000);
             return () => clearTimeout(timer);
         }
-    });
+    }, [toast.type, toast.duration, onRemove]);
 
     const colors = {
         info: { bg: 'rgba(59, 130, 246, 0.15)', border: '#3B82F6', icon: '🔷' },
@@ -74,6 +74,7 @@ function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: () => void }) 
 
     return (
         <div
+            className={isRemoving ? 'toast-slide-out' : 'toast-slide-in'}
             style={{
                 display: 'flex',
                 gap: '12px',
@@ -84,7 +85,6 @@ function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: () => void }) 
                 backdropFilter: 'blur(10px)',
                 minWidth: '320px',
                 maxWidth: '420px',
-                animation: isRemoving ? 'slideOut 0.3s ease-out' : 'slideIn 0.3s ease-out',
                 boxShadow: `0 0 20px ${style.border}40`
             }}
         >
@@ -138,9 +138,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [mounted, setMounted] = useState(false);
 
-    useState(() => {
+    useEffect(() => {
         setMounted(true);
-    });
+    }, []);
 
     const toast = useCallback((t: Omit<Toast, 'id'>) => {
         const id = Math.random().toString(36).substr(2, 9);
@@ -166,36 +166,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return (
         <ToastContext.Provider value={{ toast, encrypt, decrypt }}>
             {children}
-            {mounted && typeof window !== 'undefined' && createPortal(
-                <>
-                    <style>{`
-                        @keyframes slideIn {
-                            from { transform: translateX(-100%); opacity: 0; }
-                            to { transform: translateX(0); opacity: 1; }
-                        }
-                        @keyframes slideOut {
-                            from { transform: translateX(0); opacity: 1; }
-                            to { transform: translateX(-100%); opacity: 0; }
-                        }
-                        @keyframes pulse {
-                            0%, 100% { opacity: 1; }
-                            50% { opacity: 0.5; }
-                        }
-                    `}</style>
-                    <div style={{
-                        position: 'fixed',
-                        bottom: '24px',
-                        left: '24px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '12px',
-                        zIndex: 9999
-                    }}>
-                        {toasts.map(t => (
-                            <ToastItem key={t.id} toast={t} onRemove={() => removeToast(t.id)} />
-                        ))}
-                    </div>
-                </>,
+            {mounted && createPortal(
+                <div style={{
+                    position: 'fixed',
+                    bottom: '24px',
+                    left: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '12px',
+                    zIndex: 9999
+                }}>
+                    {toasts.map(t => (
+                        <ToastItem key={t.id} toast={t} onRemove={() => removeToast(t.id)} />
+                    ))}
+                </div>,
                 document.body
             )}
         </ToastContext.Provider>
