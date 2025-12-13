@@ -6,6 +6,7 @@
     "scripts": {
         "chain": "hardhat node --port 8545",
         "test": "hardhat test",
+        "test:bid": "hardhat run scripts/test-bid.ts --network sepolia",
         "compile": "hardhat compile",
         "clean": "npx rimraf artifacts cache typechain-types",
         "deploy:local": "hardhat run scripts/deploy.ts --network local",

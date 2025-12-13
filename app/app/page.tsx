@@ -25,10 +25,11 @@ const ERC20_ABI = [
   }
 ] as const;
 
-const CUSDC_ABI = [
+// Test USDC (standard ERC20 for bidding)
+const TEST_USDC_ABI = [
   {
-    "inputs": [{ "name": "to", "type": "address" }, { "name": "amount", "type": "uint64" }],
-    "name": "mintPublic",
+    "inputs": [{ "name": "to", "type": "address" }, { "name": "amount", "type": "uint256" }],
+    "name": "mint",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -43,7 +44,37 @@ const CUSDC_ABI = [
 ] as const;
 
 const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string}`;
-const CUSDC_ADDRESS = process.env.NEXT_PUBLIC_CUSDC_ADDRESS as `0x${string}`;
+const TEST_USDC_ADDRESS = process.env.NEXT_PUBLIC_TEST_USDC_ADDRESS as `0x${string}`;
+const AUCTION_ADDRESS = process.env.NEXT_PUBLIC_AUCTION_ADDRESS as `0x${string}`;
+
+// Auction contract ABI (minimal for reading auctions)
+const AUCTION_ABI = [
+  {
+    "inputs": [],
+    "name": "auctionCount",
+    "outputs": [{ "name": "", "type": "uint256" }],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [{ "name": "", "type": "uint256" }],
+    "name": "auctions",
+    "outputs": [
+      { "name": "seller", "type": "address" },
+      { "name": "tokenSold", "type": "address" },
+      { "name": "totalLots", "type": "uint256" },
+      { "name": "startTick", "type": "uint32" },
+      { "name": "endTick", "type": "uint32" },
+      { "name": "tickSize", "type": "uint32" },
+      { "name": "startTime", "type": "uint256" },
+      { "name": "endTime", "type": "uint256" },
+      { "name": "finalized", "type": "bool" },
+      { "name": "clearingTick", "type": "uint32" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+] as const;
 
 function Skeleton({ width = '100%', height = '20px' }: { width?: string; height?: string }) {
   return (
@@ -87,22 +118,57 @@ export default function Home() {
     query: { enabled: !!address && !!SAMPLE_TOKEN }
   });
 
-  const { data: cusdcBalance, refetch: refetchCusdc } = useReadContract({
-    address: CUSDC_ADDRESS,
-    abi: CUSDC_ABI,
+  const { data: usdcBalance, refetch: refetchUsdc } = useReadContract({
+    address: TEST_USDC_ADDRESS,
+    abi: TEST_USDC_ABI,
     functionName: 'balanceOf',
     args: [address!],
-    query: { enabled: !!address && !!CUSDC_ADDRESS }
+    query: { enabled: !!address && !!TEST_USDC_ADDRESS }
   });
 
+  // Fetch auction count
+  const { data: auctionCount } = useReadContract({
+    address: AUCTION_ADDRESS,
+    abi: AUCTION_ABI,
+    functionName: 'auctionCount',
+    query: { enabled: !!AUCTION_ADDRESS }
+  });
+
+  // Fetch auctions when count changes
   useEffect(() => {
-    const timer = setTimeout(() => setIsLoading(false), 1500);
-    return () => clearTimeout(timer);
-  }, []);
+    const fetchAuctions = async () => {
+      if (!auctionCount || !AUCTION_ADDRESS) {
+        setIsLoading(false);
+        return;
+      }
+
+      const count = Number(auctionCount);
+      if (count === 0) {
+        setAuctions([]);
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        // For now, we'll create placeholder data since useReadContract can't loop
+        // In production, use multicall or a subgraph
+        const auctionList = [];
+        for (let i = 0; i < count; i++) {
+          auctionList.push({ id: i });
+        }
+        setAuctions(auctionList);
+      } catch (error) {
+        console.error('Failed to fetch auctions:', error);
+      }
+      setIsLoading(false);
+    };
+
+    fetchAuctions();
+  }, [auctionCount]);
 
   useEffect(() => {
     if (isPending && !encryptToastId && currentAction) {
-      const text = currentAction === 'smpl' ? 'MINTING SMPL...' : 'MINTING cUSDC...';
+      const text = currentAction === 'smpl' ? 'MINTING SMPL...' : 'MINTING USDC...';
       const id = encrypt(text, 'Waiting for wallet confirmation');
       setEncryptToastId(id);
     }
@@ -123,9 +189,9 @@ export default function Home() {
         toast({ type: 'success', title: 'SMPL Minted', message: `You received ${Number(smplAmount).toLocaleString()} SMPL for auctions`, duration: 6000 });
         refetchSmpl();
       } else {
-        decrypt(encryptToastId, true, '✓ cUSDC MINTED!', `${cusdcAmount} cUSDC received`);
-        toast({ type: 'success', title: 'cUSDC Minted', message: `You received ${Number(cusdcAmount).toLocaleString()} cUSDC for bidding`, duration: 6000 });
-        refetchCusdc();
+        decrypt(encryptToastId, true, '✓ USDC MINTED!', `${cusdcAmount} USDC received`);
+        toast({ type: 'success', title: 'USDC Minted', message: `You received ${Number(cusdcAmount).toLocaleString()} USDC for bidding`, duration: 6000 });
+        refetchUsdc();
       }
       setEncryptToastId(null);
       setCurrentAction(null);
@@ -144,14 +210,14 @@ export default function Home() {
     });
   };
 
-  const handleMintCusdc = () => {
+  const handleMintUsdc = () => {
     if (!address) return;
     setCurrentAction('cusdc');
     writeContract({
-      address: CUSDC_ADDRESS,
-      abi: CUSDC_ABI,
-      functionName: 'mintPublic',
-      args: [address, BigInt(cusdcAmount)]
+      address: TEST_USDC_ADDRESS,
+      abi: TEST_USDC_ABI,
+      functionName: 'mint',
+      args: [address, parseUnits(cusdcAmount, 6)]  // USDC uses 6 decimals
     });
   };
 
@@ -338,15 +404,15 @@ export default function Home() {
                   <span style={{ fontSize: '12px', background: '#333', padding: '2px 8px', borderRadius: '4px', color: '#888' }}>STEP 1</span>
                 </div>
                 <h3 style={{ fontSize: '15px', color: 'var(--gold-primary)', marginBottom: '2px' }}>
-                  💰 Mint cUSDC
+                  💵 Mint USDC
                 </h3>
-                <p style={{ fontSize: '11px', color: '#666' }}>For bidding in auctions</p>
+                <p style={{ fontSize: '11px', color: '#666' }}>Then shield → cUSDC for bidding</p>
               </div>
-              {isConnected && cusdcBalance !== undefined && (
+              {isConnected && usdcBalance !== undefined && (
                 <div style={{ textAlign: 'right' }}>
                   <div style={{ fontSize: '10px', color: '#888' }}>Balance</div>
                   <div style={{ fontSize: '16px', fontWeight: 'bold', color: 'var(--gold-primary)' }}>
-                    {formatUnits(cusdcBalance as bigint, 0)}
+                    {Number(formatUnits(usdcBalance as bigint, 6)).toLocaleString()}
                   </div>
                 </div>
               )}
@@ -362,7 +428,7 @@ export default function Home() {
                 disabled={isProcessing || !isConnected}
               />
               <button
-                onClick={handleMintCusdc}
+                onClick={handleMintUsdc}
                 disabled={!isConnected || isProcessing}
                 className="cyber-button"
                 style={{ padding: '12px 20px', fontSize: '13px' }}
@@ -437,7 +503,55 @@ export default function Home() {
             </Link>
           </div>
         ) : (
-          <div>{/* Auction list */}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '24px' }}>
+            {auctions.map((auction) => (
+              <Link
+                key={auction.id}
+                href={`/auction/${auction.id}`}
+                style={{ textDecoration: 'none' }}
+              >
+                <div className="neon-card" style={{
+                  padding: '24px',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  height: '200px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '16px' }}>
+                    <div style={{
+                      width: '50px',
+                      height: '50px',
+                      background: 'linear-gradient(135deg, var(--gold-primary), #FFA500)',
+                      borderRadius: '12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '24px'
+                    }}>🔐</div>
+                    <span style={{
+                      background: 'rgba(0, 255, 0, 0.1)',
+                      color: '#00ff00',
+                      padding: '4px 12px',
+                      borderRadius: '20px',
+                      fontSize: '11px',
+                      fontWeight: 'bold'
+                    }}>ACTIVE</span>
+                  </div>
+                  <h3 style={{ fontSize: '18px', color: '#fff', marginBottom: '8px' }}>Auction #{auction.id}</h3>
+                  <p style={{ color: '#888', fontSize: '13px', marginBottom: '16px' }}>Sealed-bid Dutch auction</p>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    borderTop: '1px solid rgba(255, 215, 0, 0.1)',
+                    paddingTop: '12px',
+                    fontSize: '12px'
+                  }}>
+                    <span style={{ color: '#666' }}>Click to view details</span>
+                    <span style={{ color: 'var(--gold-primary)' }}>→</span>
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
         )}
       </section>
     </div>

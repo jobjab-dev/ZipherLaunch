@@ -2,14 +2,15 @@
 pragma solidity ^0.8.24;
 
 import { FHE, euint64, euint32, ebool, externalEuint64 } from "@fhevm/solidity/lib/FHE.sol";
-import "./ConfidentialERC20.sol";
+import { ZamaEthereumConfig } from "@fhevm/solidity/config/ZamaConfig.sol";
+import { IERC7984 } from "@openzeppelin/confidential-contracts/interfaces/IERC7984.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IGateway {
     function requestDecryption(uint256[] calldata ctsHandles, bytes4 callbackSelector, uint256 msgValue, uint256 maxTimestamp, bool passSignaturesToCaller) external returns (uint256);
 }
 
-contract SealedDutchAuction {
+contract SealedDutchAuction is ZamaEthereumConfig {
     struct Auction {
         address seller;
         address tokenSold;
@@ -41,18 +42,18 @@ contract SealedDutchAuction {
     mapping(uint256 => Bid[]) public auctionBids;
     mapping(uint256 => mapping(uint32 => euint64)) public auctionTickDemand;
 
-    ConfidentialERC20 public paymentToken;
+    IERC7984 public paymentToken;  // Confidential wrapped stablecoin (ERC7984)
     address public gateway;
 
     mapping(uint256 => uint256) public finalizeRequests;
     mapping(uint256 => ClaimContext) public claimRequests;
 
     event AuctionCreated(uint256 indexed auctionId, address seller, address token);
-    event BidPlaced(uint256 indexed auctionId, address bidder);
+    event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick);
     event AuctionFinalized(uint256 indexed auctionId, uint32 clearingTick);
 
     constructor(address _paymentToken, address _gateway) {
-        paymentToken = ConfidentialERC20(_paymentToken);
+        paymentToken = IERC7984(_paymentToken);
         gateway = _gateway;
     }
 
@@ -99,8 +100,9 @@ contract SealedDutchAuction {
         uint64 pricePerLot = uint64(tick) * uint64(auc.tickSize);
         euint64 cost = FHE.mul(lots, pricePerLot);
         FHE.allowThis(cost);
+        FHE.allow(cost, address(paymentToken));
 
-        paymentToken.transferFromEncrypted(msg.sender, address(this), cost);
+        paymentToken.confidentialTransferFrom(msg.sender, address(this), cost);
 
         euint64 current = auctionTickDemand[auctionId][tick];
         euint64 newDemand = FHE.add(current, lots);
@@ -115,7 +117,7 @@ contract SealedDutchAuction {
             claimed: false
         }));
 
-        emit BidPlaced(auctionId, msg.sender);
+        emit BidPlaced(auctionId, msg.sender, tick);
     }
 
     function requestFinalize(uint256 auctionId) external {
@@ -163,7 +165,7 @@ contract SealedDutchAuction {
         if (bid.tick < auc.clearingTick) {
              // Lost: Immediate refund
              bid.claimed = true;
-             paymentToken.transferEncrypted(msg.sender, bid.paidEnc);
+             paymentToken.confidentialTransfer(msg.sender, bid.paidEnc);
              return;
         }
 
@@ -191,7 +193,7 @@ contract SealedDutchAuction {
         euint64 refundEnc = FHE.mul(bid.lotsEnc, refundScalar);
         FHE.allowThis(refundEnc);
             
-        paymentToken.transferEncrypted(bid.bidder, refundEnc);
+        paymentToken.confidentialTransfer(bid.bidder, refundEnc);
             
         // Transfer Public Token
         IERC20(auc.tokenSold).transfer(bid.bidder, uint64(decryptedLots));

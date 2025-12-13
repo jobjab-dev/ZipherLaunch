@@ -53,9 +53,9 @@ const AUCTION_ADDRESS = process.env.NEXT_PUBLIC_AUCTION_ADDRESS as `0x${string}`
 const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string}`;
 
 // Zama-style defaults
-const DEFAULT_START_TICK = 100;
-const DEFAULT_END_TICK = 11;
-const DEFAULT_TICK_SIZE = 5000;
+const DEFAULT_START_TICK = 100;   // Max price tick
+const DEFAULT_END_TICK = 10;      // Min price tick (floor)
+const DEFAULT_TICK_SIZE = 1000;   // TickSize in raw units (1000 units of USDC = $0.001)
 const DEFAULT_DURATION_DAYS = 4;
 
 export default function CreateAuction() {
@@ -386,7 +386,7 @@ export default function CreateAuction() {
                                     </div>
                                 </div>
                                 <p style={{ fontSize: '10px', color: '#555', marginTop: '8px' }}>
-                                    Price = Tick × Tick Size ($0.005 increments)
+                                    Price = Tick × Tick Size / 1,000,000 (USDC Decimals)
                                 </p>
                             </div>
 
@@ -499,6 +499,6 @@ export default function CreateAuction() {
                     </div>
                 )}
             </div>
-        </div>
+        </div >
     );
 }

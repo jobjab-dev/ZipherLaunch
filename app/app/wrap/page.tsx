@@ -2,8 +2,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract, useWalletClient } from 'wagmi';
-import { parseUnits, formatUnits } from 'viem';
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract, useWalletClient, usePublicClient } from 'wagmi';
+import { parseUnits, formatUnits, decodeEventLog } from 'viem';
 import { useFhevm } from '../components/FhevmProvider';
 import ScrambleText from '../components/ScrambleText';
 import { useToast } from '../components/Toast';
@@ -65,8 +65,26 @@ const WRAPPER_ABI = [
         "type": "function"
     },
     {
-        "inputs": [{ "name": "to", "type": "address" }, { "name": "amount", "type": "uint256" }],
-        "name": "withdrawTo",
+        // unwrap with encrypted input and input proof (ERC7984ERC20Wrapper)
+        "inputs": [
+            { "name": "from", "type": "address" },
+            { "name": "to", "type": "address" },
+            { "name": "encryptedAmount", "type": "bytes32" },
+            { "name": "inputProof", "type": "bytes" }
+        ],
+        "name": "unwrap",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        // finalizeUnwrap to complete the unwrap process with decryption proof
+        "inputs": [
+            { "name": "burntAmount", "type": "bytes32" },
+            { "name": "burntAmountCleartext", "type": "uint64" },
+            { "name": "decryptionProof", "type": "bytes" }
+        ],
+        "name": "finalizeUnwrap",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
@@ -77,32 +95,60 @@ const WRAPPER_ABI = [
         "outputs": [{ "name": "", "type": "bytes32" }],
         "stateMutability": "view",
         "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{ "name": "", "type": "uint8" }],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        // UnwrapRequested event emitted when unwrap is called
+        "anonymous": false,
+        "inputs": [
+            { "indexed": true, "name": "receiver", "type": "address" },
+            { "indexed": false, "name": "amount", "type": "bytes32" }
+        ],
+        "name": "UnwrapRequested",
+        "type": "event"
     }
 ] as const;
 
 const WRAPPER_FACTORY_ADDRESS = process.env.NEXT_PUBLIC_WRAPPER_FACTORY_ADDRESS as `0x${string}`;
 const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string}`;
+const TEST_USDC_ADDRESS = process.env.NEXT_PUBLIC_TEST_USDC_ADDRESS as `0x${string}`;
+
+// Predefined tokens for easy selection
+const PREDEFINED_TOKENS = [
+    { name: 'USDC', symbol: 'USDC', address: TEST_USDC_ADDRESS },
+    { name: 'Sample Token', symbol: 'SMPL', address: SAMPLE_TOKEN },
+] as const;
 
 export default function WrapPage() {
     const { address, isConnected } = useAccount();
     const { data: walletClient } = useWalletClient();
+    const publicClient = usePublicClient();
     const { isInitialized: isFhevmReady, status: fhevmStatus, instance } = useFhevm();
     const { encrypt, decrypt, toast } = useToast();
 
     const [mode, setMode] = useState<'wrap' | 'unwrap'>('wrap');
-    const [tokenAddress, setTokenAddress] = useState<`0x${string}`>(SAMPLE_TOKEN || '0x');
+    const [tokenAddress, setTokenAddress] = useState<`0x${string}`>(TEST_USDC_ADDRESS || SAMPLE_TOKEN || '0x');
     const [amount, setAmount] = useState('');
     const [approvalDone, setApprovalDone] = useState(false);
     const [currentAction, setCurrentAction] = useState<'create' | 'approve' | 'wrap' | 'unwrap' | null>(null);
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
     const [successState, setSuccessState] = useState(false);
 
+    // Unwrap progress state (for multi-step flow)
+    const [unwrapStep, setUnwrapStep] = useState<'idle' | 'encrypting' | 'unwrapping' | 'decrypting' | 'finalizing' | 'done'>('idle');
+
     // Decryption state
     const [decryptedBalance, setDecryptedBalance] = useState<string | null>(null);
     const [isDecryptingBalance, setIsDecryptingBalance] = useState(false);
     const [decryptError, setDecryptError] = useState<string | null>(null);
 
-    const { data: hash, isPending, writeContract, reset } = useWriteContract();
+    const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
     const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
 
     // Check if wrapper exists
@@ -343,16 +389,138 @@ export default function WrapPage() {
         });
     };
 
-    const handleUnwrap = () => {
-        if (!wrapperAddress || !decimals || !amount) return;
+    const handleUnwrap = async () => {
+        if (!wrapperAddress || !amount || !instance || !address || !publicClient) {
+            toast({ type: 'error', title: 'Not Ready', message: 'Please connect wallet and ensure FHEVM is ready' });
+            return;
+        }
+
         setCurrentAction('unwrap');
-        const amountWei = parseUnits(amount, Number(decimals));
-        writeContract({
-            address: wrapperAddress as `0x${string}`,
-            abi: WRAPPER_ABI,
-            functionName: 'withdrawTo',
-            args: [address!, amountWei]
-        });
+        setUnwrapStep('encrypting');
+
+        try {
+            // Helper function to convert Uint8Array to hex string
+            const toHex = (arr: Uint8Array): `0x${string}` => {
+                return `0x${Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')}` as `0x${string}`;
+            };
+
+            // ============ STEP 1: Create encrypted input ============
+            const ERC7984_DECIMALS = 6;
+            const amountNumber = parseFloat(amount);
+            const amountRaw = BigInt(Math.floor(amountNumber * (10 ** ERC7984_DECIMALS)));
+
+            console.log('🔄 Step 1: Creating encrypted input...');
+            toast({ type: 'info', title: 'Step 1/4', message: 'Encrypting amount...' });
+
+            const encryptedInput = instance.createEncryptedInput(
+                wrapperAddress as `0x${string}`,
+                address
+            );
+            encryptedInput.add64(amountRaw);
+            const { handles, inputProof } = await encryptedInput.encrypt();
+
+            const encryptedAmountHex = toHex(handles[0]);
+            const inputProofHex = toHex(inputProof);
+
+            console.log('✅ Step 1 complete: Encrypted amount created');
+
+            // ============ STEP 2: Call unwrap() ============
+            setUnwrapStep('unwrapping');
+            console.log('🔄 Step 2: Calling unwrap()...');
+            toast({ type: 'info', title: 'Step 2/4', message: 'Please confirm unwrap transaction...' });
+
+            const unwrapHash = await writeContractAsync({
+                address: wrapperAddress as `0x${string}`,
+                abi: WRAPPER_ABI,
+                functionName: 'unwrap',
+                args: [address, address, encryptedAmountHex, inputProofHex]
+            });
+
+            console.log('   Unwrap tx hash:', unwrapHash);
+
+            // Wait for transaction to be confirmed
+            const unwrapReceipt = await publicClient.waitForTransactionReceipt({ hash: unwrapHash });
+            console.log('✅ Step 2 complete: Unwrap confirmed');
+
+            // ============ STEP 3: Parse UnwrapRequested event & call publicDecrypt ============
+            setUnwrapStep('decrypting');
+            console.log('🔄 Step 3: Getting decryption proof...');
+            toast({ type: 'info', title: 'Step 3/4', message: 'Fetching decryption proof from Gateway...' });
+
+            // Find UnwrapRequested event to get burnt amount handle
+            const unwrapRequestedEvent = unwrapReceipt.logs.find(log => {
+                try {
+                    const decoded = decodeEventLog({
+                        abi: WRAPPER_ABI,
+                        data: log.data,
+                        topics: log.topics as [signature: `0x${string}`, ...args: `0x${string}`[]]
+                    });
+                    return decoded.eventName === 'UnwrapRequested';
+                } catch {
+                    return false;
+                }
+            });
+
+            if (!unwrapRequestedEvent) {
+                throw new Error('UnwrapRequested event not found in transaction receipt');
+            }
+
+            const decoded = decodeEventLog({
+                abi: WRAPPER_ABI,
+                data: unwrapRequestedEvent.data,
+                topics: unwrapRequestedEvent.topics as [signature: `0x${string}`, ...args: `0x${string}`[]]
+            });
+
+            const burntAmountHandle = (decoded.args as { amount: `0x${string}` }).amount;
+            console.log('   Burnt amount handle:', burntAmountHandle);
+
+            // Call publicDecrypt to get the decryption proof
+            const decryptResult = await instance.publicDecrypt([burntAmountHandle]);
+            console.log('   Decrypt result:', decryptResult);
+
+            const cleartextAmount = decryptResult.clearValues[burntAmountHandle];
+            const decryptionProof = decryptResult.decryptionProof;
+
+            if (cleartextAmount === undefined) {
+                throw new Error('Failed to decrypt burnt amount');
+            }
+
+            console.log('✅ Step 3 complete: Got cleartext and proof');
+            console.log('   Cleartext amount:', cleartextAmount);
+
+            // ============ STEP 4: Call finalizeUnwrap() ============
+            setUnwrapStep('finalizing');
+            console.log('🔄 Step 4: Calling finalizeUnwrap()...');
+            toast({ type: 'info', title: 'Step 4/4', message: 'Please confirm finalize transaction...' });
+
+            const finalizeHash = await writeContractAsync({
+                address: wrapperAddress as `0x${string}`,
+                abi: WRAPPER_ABI,
+                functionName: 'finalizeUnwrap',
+                args: [burntAmountHandle, BigInt(String(cleartextAmount)), decryptionProof as `0x${string}`]
+            });
+
+            console.log('   Finalize tx hash:', finalizeHash);
+
+            // Wait for finalize to be confirmed
+            await publicClient.waitForTransactionReceipt({ hash: finalizeHash });
+            console.log('✅ Step 4 complete: Unwrap finalized!');
+
+            setUnwrapStep('done');
+            setSuccessState(true);
+            toast({ type: 'success', title: 'Unshield Complete!', message: `${amount} tokens successfully unshielded` });
+
+            // Refresh balances
+            refetchBalance();
+            refetchEncrypted();
+            setDecryptedBalance(null);
+
+        } catch (error) {
+            console.error('Unwrap error:', error);
+            toast({ type: 'error', title: 'Unwrap Failed', message: error instanceof Error ? error.message : 'Unknown error' });
+            setUnwrapStep('idle');
+            setCurrentAction(null);
+        }
     };
 
     const handleReset = () => {
@@ -459,6 +627,36 @@ export default function WrapPage() {
 
                     {!successState ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            {/* Quick Token Selector */}
+                            <div>
+                                <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '6px' }}>
+                                    SELECT TOKEN
+                                </label>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    {PREDEFINED_TOKENS.map((token) => (
+                                        <button
+                                            key={token.symbol}
+                                            onClick={() => { setTokenAddress(token.address); setApprovalDone(false); setDecryptedBalance(null); }}
+                                            disabled={isProcessing}
+                                            style={{
+                                                flex: 1,
+                                                padding: '10px 16px',
+                                                background: tokenAddress === token.address ? 'var(--gold-primary)' : 'transparent',
+                                                color: tokenAddress === token.address ? '#000' : 'var(--gold-primary)',
+                                                border: '1px solid var(--gold-primary)',
+                                                borderRadius: '8px',
+                                                cursor: isProcessing ? 'not-allowed' : 'pointer',
+                                                fontWeight: 'bold',
+                                                fontSize: '13px',
+                                                transition: 'all 0.2s ease'
+                                            }}
+                                        >
+                                            {token.symbol}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
                             {/* Token Address */}
                             <div>
                                 <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '6px' }}>
@@ -474,7 +672,7 @@ export default function WrapPage() {
                                     disabled={isProcessing}
                                 />
                                 <p style={{ fontSize: '10px', color: '#555', marginTop: '4px' }}>
-                                    Default: Sample Token (SMPL)
+                                    Or enter any ERC20 token address
                                 </p>
                             </div>
 

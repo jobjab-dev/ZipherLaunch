@@ -18,6 +18,11 @@
       "type": "constructor"
     },
     {
+      "inputs": [],
+      "name": "ZamaProtocolUnsupported",
+      "type": "error"
+    },
+    {
       "anonymous": false,
       "inputs": [
         {
@@ -71,10 +76,16 @@
           "type": "uint256"
         },
         {
-          "indexed": false,
+          "indexed": true,
           "internalType": "address",
           "name": "bidder",
           "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint32",
+          "name": "tick",
+          "type": "uint32"
         }
       ],
       "name": "BidPlaced",
@@ -250,6 +261,19 @@
       "type": "function"
     },
     {
+      "inputs": [],
+      "name": "confidentialProtocolId",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
       "inputs": [
         {
           "internalType": "address",
@@ -365,7 +389,7 @@
       "name": "paymentToken",
       "outputs": [
         {
-          "internalType": "contract ConfidentialERC20",
+          "internalType": "contract IERC7984",
           "name": "",
           "type": "address"
         }
