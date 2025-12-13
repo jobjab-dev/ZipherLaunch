@@ -2,8 +2,8 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
 import { useFhevm } from '../../components/FhevmProvider';
-import { useState, useEffect, use } from 'react';
-import { useReadContract, useAccount, useWriteContract, useWaitForTransactionReceipt, usePublicClient } from 'wagmi';
+import { useState, useEffect, use, useMemo, useCallback } from 'react';
+import { useReadContract, useAccount, useWriteContract, useWaitForTransactionReceipt, usePublicClient, useWalletClient } from 'wagmi';
 import { formatUnits, parseAbiItem } from 'viem';
 import ScrambleText from '../../components/ScrambleText';
 import TypewriterText from '../../components/TypewriterText';
@@ -89,6 +89,7 @@ interface PageProps {
 export default function AuctionDetail({ params }: PageProps) {
     const { id } = use(params);
     const { address, isConnected } = useAccount();
+    const { data: walletClient } = useWalletClient();
     const { instance, isInitialized: fheReady, status: fheStatus } = useFhevm();
     const { encrypt, decrypt, toast } = useToast();
 
@@ -99,6 +100,14 @@ export default function AuctionDetail({ params }: PageProps) {
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
     const [approvalDone, setApprovalDone] = useState(false);
     const [currentAction, setCurrentAction] = useState<'approve' | 'bid' | null>(null);
+
+    // Latest and highest price from events
+    const [latestBidTick, setLatestBidTick] = useState<number | null>(null);
+    const [highestBidTick, setHighestBidTick] = useState<number | null>(null);
+
+    // cUSDC balance state
+    const [decryptedCusdcBalance, setDecryptedCusdcBalance] = useState<string | null>(null);
+    const [isDecryptingBalance, setIsDecryptingBalance] = useState(false);
 
     // Write contract hooks
     const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
@@ -112,6 +121,107 @@ export default function AuctionDetail({ params }: PageProps) {
         args: [address!, AUCTION_ADDRESS],
         query: { enabled: !!address && !!CUSDC_ADDRESS && !!AUCTION_ADDRESS }
     });
+
+    // Get cUSDC encrypted balance handle
+    const { data: cusdcBalanceHandle, refetch: refetchCusdcBalance } = useReadContract({
+        address: CUSDC_ADDRESS,
+        abi: CUSDC_ABI,
+        functionName: 'confidentialBalanceOf',
+        args: [address!],
+        query: { enabled: !!address && !!CUSDC_ADDRESS }
+    });
+
+    const hasCusdcBalance = cusdcBalanceHandle && cusdcBalanceHandle !== '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+    // Auto-set approvalDone if already operator
+    useEffect(() => {
+        if (isAlreadyOperator === true) {
+            setApprovalDone(true);
+        }
+    }, [isAlreadyOperator]);
+
+    // Adapter: wagmi walletClient -> ethers-like signer for decryption
+    const signer = useMemo(() => {
+        if (!walletClient) return null;
+        return {
+            getAddress: async () => walletClient.account.address,
+            signTypedData: async (domain: any, types: any, message: any) => {
+                return walletClient.signTypedData({
+                    domain,
+                    types,
+                    primaryType: Object.keys(types)[0],
+                    message
+                });
+            }
+        };
+    }, [walletClient]);
+
+    // Decrypt cUSDC balance function
+    const handleDecryptCusdcBalance = useCallback(async () => {
+        if (!fheReady || !hasCusdcBalance || !signer || !instance) {
+            toast({ type: 'error', title: 'Not Ready', message: `FHEVM Status: ${fheStatus}` });
+            return;
+        }
+
+        setIsDecryptingBalance(true);
+
+        try {
+            const keypair = instance.generateKeypair();
+            const startTimestamp = Math.floor(Date.now() / 1000);
+            const durationDays = 365;
+
+            const eip712 = instance.createEIP712(
+                keypair.publicKey,
+                [CUSDC_ADDRESS],
+                startTimestamp,
+                durationDays
+            );
+
+            toast({ type: 'info', title: 'Sign Required', message: 'Please sign the decryption request' });
+
+            const signatureString = await signer.signTypedData(
+                eip712.domain,
+                { UserDecryptRequestVerification: eip712.types.UserDecryptRequestVerification },
+                eip712.message
+            );
+            const userAddress = await signer.getAddress();
+
+            toast({ type: 'info', title: 'Decrypting...', message: 'Fetching balance from KMS...' });
+
+            const requests = [{
+                handle: cusdcBalanceHandle as string,
+                contractAddress: CUSDC_ADDRESS
+            }];
+
+            const result = await instance.userDecrypt(
+                requests,
+                keypair.privateKey,
+                keypair.publicKey,
+                signatureString,
+                [CUSDC_ADDRESS],
+                userAddress,
+                startTimestamp,
+                durationDays
+            );
+
+            const value = (result as Record<string, bigint | boolean | `0x${string}` | undefined>)[cusdcBalanceHandle as string];
+
+            if (value !== undefined) {
+                const ERC7984_DECIMALS = 6;
+                const formatted = Number(formatUnits(BigInt(String(value)), ERC7984_DECIMALS)).toLocaleString();
+                setDecryptedCusdcBalance(formatted);
+                toast({ type: 'success', title: 'Balance Decrypted!', message: `Your cUSDC: ${formatted}` });
+            } else {
+                setDecryptedCusdcBalance('0');
+            }
+        } catch (error: unknown) {
+            console.error('Decrypt error:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Decryption failed';
+            toast({ type: 'error', title: 'Decrypt Failed', message: errorMessage });
+        } finally {
+            setIsDecryptingBalance(false);
+        }
+    }, [fheReady, hasCusdcBalance, signer, cusdcBalanceHandle, toast, fheStatus, instance]);
 
     // Fetch auction data from contract
     const { data: auctionData, isLoading: isLoadingAuction } = useReadContract({
@@ -166,6 +276,16 @@ export default function AuctionDetail({ params }: PageProps) {
         return 'LIVE';
     };
 
+    // Compute required cUSDC for current bid
+    const requiredCusdc = bidQty && bidPriceTick && auction
+        ? (Number(bidQty) * Number(bidPriceTick) * auction.tickSize / 1000000).toFixed(2)
+        : null;
+
+    // Check if user has sufficient balance (parsed from decryptedCusdcBalance)
+    const hasSufficientBalance = decryptedCusdcBalance !== null && requiredCusdc !== null
+        ? parseFloat(decryptedCusdcBalance.replace(/,/g, '')) >= parseFloat(requiredCusdc)
+        : null;
+
     // Handle cUSDC approval
     const handleApprove = () => {
         if (!bidQty || !bidPriceTick || !auction) {
@@ -211,7 +331,7 @@ export default function AuctionDetail({ params }: PageProps) {
             return;
         }
 
-        if (!approvalDone) {
+        if (!approvalDone && !isAlreadyOperator) {
             toast({ type: 'error', title: 'Approval Required', message: 'Approve cUSDC first' });
             return;
         }
@@ -293,7 +413,7 @@ export default function AuctionDetail({ params }: PageProps) {
     const [bidHistory, setBidHistory] = useState<any[]>([]);
 
     useEffect(() => {
-        if (!publicClient || !address || !id) return;
+        if (!publicClient || !id) return;
 
         const fetchHistory = async () => {
             try {
@@ -301,21 +421,37 @@ export default function AuctionDetail({ params }: PageProps) {
                 const currentBlock = await publicClient.getBlockNumber();
                 const fromBlock = currentBlock - 1000n > 0n ? currentBlock - 1000n : 0n;
 
-                const logs = await publicClient.getLogs({
+                // Fetch ALL bids for this auction to get latest price
+                const allLogs = await publicClient.getLogs({
                     address: AUCTION_ADDRESS,
-                    event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address bidder)'),
+                    event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick)'),
                     args: {
                         auctionId: BigInt(id)
                     },
                     fromBlock: fromBlock
                 });
 
-                // Manually filter by bidder since it's not indexed in contract event
-                const myLogs = logs.filter(log =>
-                    log.args.bidder && log.args.bidder.toLowerCase() === address.toLowerCase()
-                );
+                // Set latest bid tick from most recent event and find highest bid
+                if (allLogs.length > 0) {
+                    const lastLog = allLogs[allLogs.length - 1];
+                    if (lastLog.args.tick !== undefined) {
+                        setLatestBidTick(Number(lastLog.args.tick));
+                    }
 
-                setBidHistory(myLogs);
+                    // Find highest bid tick from all events
+                    const maxTick = Math.max(...allLogs.map(log => Number(log.args.tick || 0)));
+                    if (maxTick > 0) {
+                        setHighestBidTick(maxTick);
+                    }
+                }
+
+                // Filter for user's bids only for history display
+                if (address) {
+                    const myLogs = allLogs.filter(log =>
+                        log.args.bidder && log.args.bidder.toLowerCase() === address.toLowerCase()
+                    );
+                    setBidHistory(myLogs);
+                }
             } catch (e) {
                 console.error("Failed to fetch history:", e);
             }
@@ -402,30 +538,100 @@ export default function AuctionDetail({ params }: PageProps) {
                                 </p>
                             </div>
 
-                            {/* Stats Grid - Full Auction Info */}
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
-                                {[
-                                    { label: 'STATUS', value: getStatus(), color: getStatus() === 'LIVE' ? '#00FF64' : getStatus() === 'ENDED' ? '#FF6464' : getStatus() === 'UPCOMING' ? '#FFD700' : '#888' },
-                                    { label: 'TOKEN', value: tokenSymbol || '...', color: 'var(--gold-primary)' },
-                                    { label: 'TOTAL LOTS', value: formattedLots, color: '#fff' },
-                                    { label: 'TICK RANGE', value: auction ? `${auction.endTick} - ${auction.startTick}` : '...', color: '#fff' },
-                                    { label: 'MIN PRICE', value: auction ? `$${(auction.endTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#00FF64' },
-                                    { label: 'MAX PRICE', value: auction ? `$${(auction.startTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#FF6464' },
-                                    { label: 'STARTS', value: auction ? new Date(Number(auction.startTime) * 1000).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '...', color: '#888' },
-                                    { label: 'ENDS', value: auction ? new Date(Number(auction.endTime) * 1000).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '...', color: '#888' }
-                                ].map((stat, i) => (
-                                    <div key={i} style={{
-                                        background: 'rgba(0,0,0,0.3)',
-                                        padding: '16px',
-                                        borderRadius: '10px',
-                                        border: '1px solid rgba(255,255,255,0.05)'
-                                    }}>
-                                        <div style={{ fontSize: '10px', color: '#666', marginBottom: '6px', letterSpacing: '1px' }}>{stat.label}</div>
-                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: stat.color, fontFamily: 'monospace' }}>
-                                            {stat.value}
+                            {/* Section 1: Auction Info */}
+                            <div style={{ marginBottom: '24px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                                    <span style={{ color: 'var(--gold-primary)', fontSize: '14px' }}>◆</span>
+                                    <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Auction Info</span>
+                                    <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(255,215,0,0.3), transparent)' }}></div>
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+                                    {[
+                                        { label: 'STATUS', value: getStatus(), color: getStatus() === 'LIVE' ? '#00FF64' : getStatus() === 'ENDED' ? '#FF6464' : getStatus() === 'UPCOMING' ? '#FFD700' : '#888' },
+                                        { label: 'TOKEN', value: tokenSymbol || '...', color: 'var(--gold-primary)' },
+                                        { label: 'TOTAL LOTS', value: formattedLots, color: '#fff' },
+                                        { label: 'CLEARING', value: auction?.finalized ? `$${(auction.clearingTick * auction.tickSize / 1000000).toFixed(3)}` : 'Pending', color: auction?.finalized ? '#00FF64' : '#666' }
+                                    ].map((stat, i) => (
+                                        <div key={i} style={{
+                                            background: 'rgba(0,0,0,0.4)',
+                                            padding: '16px',
+                                            borderRadius: '10px',
+                                            border: '1px solid rgba(255,215,0,0.1)'
+                                        }}>
+                                            <div style={{ fontSize: '10px', color: '#666', marginBottom: '6px', letterSpacing: '1px' }}>{stat.label}</div>
+                                            <div style={{ fontSize: '18px', fontWeight: 'bold', color: stat.color, fontFamily: 'monospace' }}>
+                                                {stat.value}
+                                            </div>
                                         </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Section 2: Bidding Activity */}
+                            <div style={{ marginBottom: '24px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                                    <span style={{ color: '#00BFFF', fontSize: '14px' }}>◆</span>
+                                    <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Bidding Activity</span>
+                                    <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(0,191,255,0.3), transparent)' }}></div>
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+                                    <div style={{
+                                        background: 'linear-gradient(135deg, rgba(255,215,0,0.1) 0%, rgba(0,0,0,0.4) 100%)',
+                                        padding: '20px',
+                                        borderRadius: '12px',
+                                        border: '1px solid rgba(255,215,0,0.2)',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '10px', color: '#888', marginBottom: '8px', letterSpacing: '1px' }}>🔥 HIGHEST BID</div>
+                                        <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#FFD700', fontFamily: 'monospace', textShadow: '0 0 20px rgba(255,215,0,0.3)' }}>
+                                            {highestBidTick !== null && auction ? `$${(highestBidTick * auction.tickSize / 1000000).toFixed(3)}` : 'No bids'}
+                                        </div>
+                                        {highestBidTick !== null && <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>Tick #{highestBidTick}</div>}
                                     </div>
-                                ))}
+                                    <div style={{
+                                        background: 'linear-gradient(135deg, rgba(0,191,255,0.1) 0%, rgba(0,0,0,0.4) 100%)',
+                                        padding: '20px',
+                                        borderRadius: '12px',
+                                        border: '1px solid rgba(0,191,255,0.2)',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '10px', color: '#888', marginBottom: '8px', letterSpacing: '1px' }}>⚡ LAST BID</div>
+                                        <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#00BFFF', fontFamily: 'monospace', textShadow: '0 0 20px rgba(0,191,255,0.3)' }}>
+                                            {latestBidTick !== null && auction ? `$${(latestBidTick * auction.tickSize / 1000000).toFixed(3)}` : 'No bids'}
+                                        </div>
+                                        {latestBidTick !== null && <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>Tick #{latestBidTick}</div>}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Section 3: Price Range & Schedule */}
+                            <div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                                    <span style={{ color: '#00FF64', fontSize: '14px' }}>◆</span>
+                                    <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Price Range & Schedule</span>
+                                    <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(0,255,100,0.3), transparent)' }}></div>
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px' }}>
+                                    {[
+                                        { label: 'MIN PRICE', value: auction ? `$${(auction.endTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#00FF64', icon: '↓' },
+                                        { label: 'MAX PRICE', value: auction ? `$${(auction.startTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#FF6464', icon: '↑' },
+                                        { label: 'TICK SIZE', value: auction ? `$${(auction.tickSize / 1000000).toFixed(6)}` : '...', color: '#888', icon: '◇' },
+                                        { label: 'STARTS', value: auction ? new Date(Number(auction.startTime) * 1000).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '...', color: '#888', icon: '▶' },
+                                        { label: 'ENDS', value: auction ? new Date(Number(auction.endTime) * 1000).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '...', color: '#888', icon: '■' }
+                                    ].map((stat, i) => (
+                                        <div key={i} style={{
+                                            background: 'rgba(0,0,0,0.3)',
+                                            padding: '14px',
+                                            borderRadius: '10px',
+                                            border: '1px solid rgba(255,255,255,0.05)'
+                                        }}>
+                                            <div style={{ fontSize: '10px', color: '#666', marginBottom: '6px', letterSpacing: '1px' }}>{stat.icon} {stat.label}</div>
+                                            <div style={{ fontSize: '14px', fontWeight: 'bold', color: stat.color, fontFamily: 'monospace' }}>
+                                                {stat.value}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
 
                             {/* Seller Info */}
@@ -502,7 +708,7 @@ export default function AuctionDetail({ params }: PageProps) {
                                         />
                                         {auction && bidPriceTick && (
                                             <p style={{ fontSize: '11px', color: 'var(--gold-primary)', marginTop: '4px' }}>
-                                                = ${(Number(bidPriceTick) * auction.tickSize / 1000).toFixed(3)} per lot
+                                                = ${(Number(bidPriceTick) * auction.tickSize / 1000000).toFixed(6)} per lot
                                             </p>
                                         )}
                                     </div>
@@ -546,47 +752,92 @@ export default function AuctionDetail({ params }: PageProps) {
                                         </div>
                                     </div>
 
+                                    {/* cUSDC Balance Display */}
+                                    {isConnected && (
+                                        <div style={{
+                                            padding: '12px',
+                                            background: 'rgba(0,0,0,0.3)',
+                                            borderRadius: '8px',
+                                            border: hasSufficientBalance === false ? '1px solid #FF6464' : '1px solid rgba(255,255,255,0.1)'
+                                        }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                <span style={{ fontSize: '11px', color: '#888' }}>YOUR cUSDC BALANCE</span>
+                                                {decryptedCusdcBalance === null && hasCusdcBalance && (
+                                                    <button
+                                                        onClick={handleDecryptCusdcBalance}
+                                                        disabled={isDecryptingBalance || !fheReady || !signer}
+                                                        style={{
+                                                            background: 'transparent',
+                                                            border: '1px solid var(--gold-primary)',
+                                                            color: 'var(--gold-primary)',
+                                                            padding: '2px 8px',
+                                                            borderRadius: '4px',
+                                                            fontSize: '10px',
+                                                            cursor: isDecryptingBalance ? 'wait' : 'pointer'
+                                                        }}
+                                                    >
+                                                        {isDecryptingBalance ? '🔓...' : '🔓 Decrypt'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: '18px', fontWeight: 'bold', color: decryptedCusdcBalance ? '#00FF64' : '#666' }}>
+                                                {decryptedCusdcBalance !== null ? `$${decryptedCusdcBalance}` : hasCusdcBalance ? '🔒 Encrypted' : '$0'}
+                                            </div>
+                                            {requiredCusdc && (
+                                                <div style={{ fontSize: '11px', marginTop: '6px', color: hasSufficientBalance === false ? '#FF6464' : '#888' }}>
+                                                    Required: ${requiredCusdc} cUSDC
+                                                    {hasSufficientBalance === true && <span style={{ color: '#00FF64' }}> ✓</span>}
+                                                    {hasSufficientBalance === false && <span> (Insufficient)</span>}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
                                     {/* Action Buttons */}
                                     <div style={{ display: 'flex', gap: '12px', marginTop: '10px' }}>
-                                        <button
-                                            onClick={handleApprove}
-                                            disabled={!isConnected || isPending || approvalDone || !bidQty || !bidPriceTick}
-                                            className="cyber-button"
-                                            style={{
-                                                flex: 1,
-                                                padding: '16px',
-                                                fontSize: '14px',
-                                                opacity: approvalDone ? 0.5 : 1,
-                                                background: approvalDone ? '#00FF64' : undefined,
-                                                color: approvalDone ? '#000' : undefined
-                                            }}
-                                        >
-                                            {approvalDone ? '✓ APPROVED' : isPending && currentAction === 'approve' ? (
-                                                <ScrambleText text="..." trigger={true} />
-                                            ) : '1. APPROVE'}
-                                        </button>
+                                        {/* Only show approve button if not already authorized */}
+                                        {!isAlreadyOperator && (
+                                            <button
+                                                onClick={handleApprove}
+                                                disabled={!isConnected || isPending || approvalDone || !bidQty || !bidPriceTick}
+                                                className="cyber-button"
+                                                style={{
+                                                    flex: 1,
+                                                    padding: '16px',
+                                                    fontSize: '14px',
+                                                    opacity: approvalDone ? 0.5 : 1,
+                                                    background: approvalDone ? '#00FF64' : undefined,
+                                                    color: approvalDone ? '#000' : undefined
+                                                }}
+                                            >
+                                                {approvalDone ? '✓ APPROVED' : isPending && currentAction === 'approve' ? (
+                                                    <ScrambleText text="..." trigger={true} />
+                                                ) : '1. APPROVE'}
+                                            </button>
+                                        )}
                                         <button
                                             onClick={handleBid}
-                                            disabled={!isConnected || isEncrypting || !approvalDone || encryptionStatus === 'success'}
+                                            disabled={!isConnected || isEncrypting || (!approvalDone && !isAlreadyOperator) || encryptionStatus === 'success' || hasSufficientBalance === false}
                                             className="cyber-button"
                                             style={{
                                                 flex: 1,
                                                 padding: '16px',
                                                 fontSize: '14px',
-                                                opacity: !approvalDone ? 0.5 : 1,
+                                                opacity: (!approvalDone && !isAlreadyOperator) || hasSufficientBalance === false ? 0.5 : 1,
                                                 cursor: isEncrypting ? 'wait' : 'pointer'
                                             }}
                                         >
                                             {isEncrypting ? (
                                                 <ScrambleText text="ENCRYPTING..." trigger={true} className="text-gold" />
-                                            ) : encryptionStatus === 'success' ? '✓ BID SENT' : '2. ENCRYPT & BID'}
+                                            ) : encryptionStatus === 'success' ? '✓ BID SENT' : isAlreadyOperator ? 'ENCRYPT & BID' : '2. ENCRYPT & BID'}
                                         </button>
                                     </div>
 
                                     {/* Operator Status */}
                                     {isConnected && (
                                         <div style={{ textAlign: 'center', fontSize: '11px', color: '#666', marginTop: '12px' }}>
-                                            Auction Operator: <span style={{ color: isAlreadyOperator ? '#00FF64' : '#FF6464' }}>{isAlreadyOperator ? '✓ Authorized' : '✕ Not Set'}</span>
+                                            Operator: <span style={{ color: isAlreadyOperator ? '#00FF64' : '#FF6464' }}>{isAlreadyOperator ? '✓ Authorized' : '✕ Not Set'}</span>
+                                            {isAlreadyOperator && <span style={{ color: '#00FF64', marginLeft: '8px' }}>(Skip Approve)</span>}
                                         </div>
                                     )}
 

@@ -326,6 +326,8 @@ export default function WrapPage() {
 
     useEffect(() => {
         if (isSuccess && encryptToastId && currentAction) {
+            let shouldCleanup = true;
+
             if (currentAction === 'create') {
                 decrypt(encryptToastId, true, '✓ WRAPPER CREATED!', 'Now approve tokens');
                 refetchWrapper();
@@ -342,15 +344,23 @@ export default function WrapPage() {
                 refetchEncrypted();
                 toast({ type: 'success', title: 'Shielded!', message: `${amount} ${String(symbol)} → c${String(symbol)}`, duration: 8000 });
             } else if (currentAction === 'unwrap') {
-                decrypt(encryptToastId, true, '✓ TOKENS UNSHIELDED!', 'Public balance updated');
-                setSuccessState(true);
-                setDecryptedBalance(null);
-                refetchBalance();
-                refetchEncrypted();
-                toast({ type: 'success', title: 'Unshielded!', message: `${amount} c${String(symbol)} → ${String(symbol)}`, duration: 8000 });
+                // Only show success for the FINAL transaction (finalizeUnwrap)
+                if (unwrapStep === 'finalizing') {
+                    decrypt(encryptToastId, true, '✓ TOKENS UNSHIELDED!', 'Public balance updated');
+                    setSuccessState(true);
+                    setDecryptedBalance(null);
+                    refetchBalance();
+                    refetchEncrypted();
+                    toast({ type: 'success', title: 'Unshielded!', message: `${amount} c${String(symbol)} → ${String(symbol)}`, duration: 8000 });
+                } else {
+                    shouldCleanup = false;
+                }
             }
-            setEncryptToastId(null);
-            setCurrentAction(null);
+
+            if (shouldCleanup) {
+                setEncryptToastId(null);
+                setCurrentAction(null);
+            }
             reset();
         }
     }, [isSuccess]);

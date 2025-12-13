@@ -53,9 +53,9 @@ const AUCTION_ADDRESS = process.env.NEXT_PUBLIC_AUCTION_ADDRESS as `0x${string}`
 const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string}`;
 
 // Zama-style defaults
-const DEFAULT_START_TICK = 100;   // Max price tick
-const DEFAULT_END_TICK = 10;      // Min price tick (floor)
-const DEFAULT_TICK_SIZE = 1000;   // TickSize in raw units (1000 units of USDC = $0.001)
+const DEFAULT_START_TICK = 1000;  // Max price tick ($5.00 with tickSize 5000)
+const DEFAULT_END_TICK = 10;      // Min price tick / floor ($0.05 with tickSize 5000)
+const DEFAULT_TICK_SIZE = 5000;   // TickSize = $0.005 per tick (5000 / 1,000,000)
 const DEFAULT_DURATION_DAYS = 4;
 
 export default function CreateAuction() {
@@ -352,7 +352,13 @@ export default function CreateAuction() {
                                 </h3>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: '12px' }}>
                                     <div>
-                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>START TICK</label>
+                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>
+                                            START TICK {formData.startTick && formData.tickSize && (
+                                                <span style={{ color: 'var(--gold-primary)' }}>
+                                                    (${(Number(formData.startTick) * Number(formData.tickSize) / 1000000).toFixed(6)})
+                                                </span>
+                                            )}
+                                        </label>
                                         <input
                                             type="number"
                                             value={formData.startTick}
@@ -363,7 +369,13 @@ export default function CreateAuction() {
                                         />
                                     </div>
                                     <div>
-                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>END TICK</label>
+                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>
+                                            END TICK {formData.endTick && formData.tickSize && (
+                                                <span style={{ color: 'var(--gold-primary)' }}>
+                                                    (${(Number(formData.endTick) * Number(formData.tickSize) / 1000000).toFixed(6)})
+                                                </span>
+                                            )}
+                                        </label>
                                         <input
                                             type="number"
                                             value={formData.endTick}
@@ -374,7 +386,13 @@ export default function CreateAuction() {
                                         />
                                     </div>
                                     <div>
-                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>TICK SIZE</label>
+                                        <label style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '4px' }}>
+                                            TICK SIZE {formData.tickSize && (
+                                                <span style={{ color: '#666' }}>
+                                                    (${(Number(formData.tickSize) / 1000000).toFixed(6)}/tick)
+                                                </span>
+                                            )}
+                                        </label>
                                         <input
                                             type="number"
                                             value={formData.tickSize}

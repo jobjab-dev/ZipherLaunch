@@ -2,6 +2,17 @@
 
 **Confidential Token Launchpad & Private Auctions** - Powered by FHE (Fully Homomorphic Encryption)
 
+## ℹ️ About
+
+**CipherLaunch** is a next-generation decentralized launchpad and auction platform built on **FHE (Fully Homomorphic Encryption)**.
+
+Traditional blockchains suffer from transparency issues where sensitive data—like bid amounts and token balances—are visible to everyone. This leads to **front-running (MEV)** and privacy leaks.
+
+CipherLaunch solves this by using **Zama's FHEVM** technology to enable:
+- **🔒 Confidential Token Wrappers**: Wrap standard ERC20 tokens into confidential counterparts (ERC7984).
+- **🙈 Sealed-Bid Auctions**: Place encrypted bids that no one (not even the auctioneer) can see until the auction ends.
+- **🛡️ Fair Market Price**: A Dutch Auction mechanism combined with encrypted bids ensures the fairest clearing price without market manipulation.
+
 ## 🏗️ Architecture
 
 ```
@@ -17,6 +28,15 @@ Bind-auction/
 ### Prerequisites
 - Node.js v18+
 - MetaMask or compatible wallet
+
+## 📚 Documentation
+
+Detailed guides to help you navigate CipherLaunch:
+
+| Guide | Description |
+|-------|-------------|
+| [**User Flow Guide**](docs/user-flow.md) | Step-by-step walkthrough: Wallet Setup → Wrapping → Bidding |
+| [**Auction Logic**](docs/auction-logic.md) | Deep dive into the Sealed-Bid Dutch Auction mechanics & math |
 
 ### 1. Install Dependencies
 ```bash

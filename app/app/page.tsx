@@ -7,6 +7,7 @@ import { formatUnits, parseUnits } from 'viem';
 import TypewriterText from './components/TypewriterText';
 import ScrambleText from './components/ScrambleText';
 import { useToast } from './components/Toast';
+import AuctionCard from './components/AuctionCard';
 
 const ERC20_ABI = [
   {
@@ -76,6 +77,7 @@ const AUCTION_ABI = [
   }
 ] as const;
 
+// Skeleton for loading state
 function Skeleton({ width = '100%', height = '20px' }: { width?: string; height?: string }) {
   return (
     <div style={{
@@ -505,51 +507,7 @@ export default function Home() {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '24px' }}>
             {auctions.map((auction) => (
-              <Link
-                key={auction.id}
-                href={`/auction/${auction.id}`}
-                style={{ textDecoration: 'none' }}
-              >
-                <div className="neon-card" style={{
-                  padding: '24px',
-                  cursor: 'pointer',
-                  transition: 'all 0.3s ease',
-                  height: '200px'
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '16px' }}>
-                    <div style={{
-                      width: '50px',
-                      height: '50px',
-                      background: 'linear-gradient(135deg, var(--gold-primary), #FFA500)',
-                      borderRadius: '12px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '24px'
-                    }}>🔐</div>
-                    <span style={{
-                      background: 'rgba(0, 255, 0, 0.1)',
-                      color: '#00ff00',
-                      padding: '4px 12px',
-                      borderRadius: '20px',
-                      fontSize: '11px',
-                      fontWeight: 'bold'
-                    }}>ACTIVE</span>
-                  </div>
-                  <h3 style={{ fontSize: '18px', color: '#fff', marginBottom: '8px' }}>Auction #{auction.id}</h3>
-                  <p style={{ color: '#888', fontSize: '13px', marginBottom: '16px' }}>Sealed-bid Dutch auction</p>
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    borderTop: '1px solid rgba(255, 215, 0, 0.1)',
-                    paddingTop: '12px',
-                    fontSize: '12px'
-                  }}>
-                    <span style={{ color: '#666' }}>Click to view details</span>
-                    <span style={{ color: 'var(--gold-primary)' }}>→</span>
-                  </div>
-                </div>
-              </Link>
+              <AuctionCard key={auction.id} id={auction.id} />
             ))}
           </div>
         )}
