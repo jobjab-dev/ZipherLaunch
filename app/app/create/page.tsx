@@ -53,14 +53,14 @@ const AUCTION_ADDRESS = process.env.NEXT_PUBLIC_AUCTION_ADDRESS as `0x${string}`
 const SAMPLE_TOKEN = process.env.NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS as `0x${string}`;
 
 // Zama-style defaults
-const DEFAULT_START_TICK = 1000;  // Max price tick ($5.00 with tickSize 5000)
-const DEFAULT_END_TICK = 10;      // Min price tick / floor ($0.05 with tickSize 5000)
+const DEFAULT_START_TICK = 10000;  // Max price tick ($5.00 with tickSize 5000)
+const DEFAULT_END_TICK = 1;      // Min price tick / floor ($0.005 with tickSize 5000)
 const DEFAULT_TICK_SIZE = 5000;   // TickSize = $0.005 per tick (5000 / 1,000,000)
 const DEFAULT_DURATION_DAYS = 4;
 
 export default function CreateAuction() {
     const { address, isConnected } = useAccount();
-    const { encrypt, decrypt, toast } = useToast();
+    const { encrypt, decrypt, dismiss, toast } = useToast();
 
     const [currentAction, setCurrentAction] = useState<'mint' | 'approve' | 'create' | null>(null);
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
@@ -89,7 +89,7 @@ export default function CreateAuction() {
         endTime: getDefaultEndTime()
     });
 
-    const { data: hash, isPending, writeContract, reset } = useWriteContract();
+    const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
     const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
 
     // Get Sample Token balance
@@ -100,16 +100,6 @@ export default function CreateAuction() {
         args: [address!],
         query: { enabled: !!address && !!SAMPLE_TOKEN }
     });
-
-    useEffect(() => {
-        if (isPending && !encryptToastId && currentAction) {
-            const actionText = currentAction === 'mint' ? 'MINTING TOKENS...'
-                : currentAction === 'approve' ? 'APPROVING TOKEN...'
-                    : 'CREATING AUCTION...';
-            const id = encrypt(actionText, 'Waiting for wallet confirmation');
-            setEncryptToastId(id);
-        }
-    }, [isPending, encryptToastId, currentAction, encrypt]);
 
     useEffect(() => {
         if (isConfirming && encryptToastId) {
@@ -140,52 +130,82 @@ export default function CreateAuction() {
         }
     }, [isSuccess]);
 
-    const handleMint = () => {
+    const handleMint = async () => {
         if (!address || !mintAmount) return;
+        const toastId = encrypt('MINTING TOKENS...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
         setCurrentAction('mint');
-        writeContract({
-            address: SAMPLE_TOKEN,
-            abi: ERC20_ABI,
-            functionName: 'mint',
-            args: [address, parseUnits(mintAmount, 18)]
-        });
+        try {
+            await writeContractAsync({
+                address: SAMPLE_TOKEN,
+                abi: ERC20_ABI,
+                functionName: 'mint',
+                args: [address, parseUnits(mintAmount, 18)]
+            });
+        } catch (err: any) {
+            console.error("Mint error:", err);
+            toast({ type: 'error', title: 'Mint Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
-    const handleApprove = () => {
+    const handleApprove = async () => {
         if (!formData.tokenAddress) return;
+        const toastId = encrypt('APPROVING TOKENS...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
         setCurrentAction('approve');
-        writeContract({
-            address: formData.tokenAddress as `0x${string}`,
-            abi: ERC20_ABI,
-            functionName: 'approve',
-            args: [AUCTION_ADDRESS, parseUnits(formData.totalLots, 18)]
-        });
+        try {
+            await writeContractAsync({
+                address: formData.tokenAddress as `0x${string}`,
+                abi: ERC20_ABI,
+                functionName: 'approve',
+                args: [AUCTION_ADDRESS, parseUnits(formData.totalLots, 18)]
+            });
+        } catch (err: any) {
+            console.error("Approve error:", err);
+            toast({ type: 'error', title: 'Approval Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
-    const handleCreate = () => {
+    const handleCreate = async () => {
         if (!formData.tokenAddress || !formData.totalLots) {
             toast({ type: 'error', title: 'Missing Fields', message: 'Please fill all required fields' });
             return;
         }
 
+        const toastId = encrypt('DEPLOYING AUCTION...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
         setCurrentAction('create');
         const startTimestamp = Math.floor(new Date(formData.startTime).getTime() / 1000);
         const endTimestamp = Math.floor(new Date(formData.endTime).getTime() / 1000);
 
-        writeContract({
-            address: AUCTION_ADDRESS,
-            abi: AUCTION_ABI,
-            functionName: 'createAuction',
-            args: [
-                formData.tokenAddress as `0x${string}`,
-                parseUnits(formData.totalLots, 18),
-                Number(formData.startTick),
-                Number(formData.endTick),
-                Number(formData.tickSize),
-                BigInt(startTimestamp),
-                BigInt(endTimestamp)
-            ]
-        });
+        try {
+            await writeContractAsync({
+                address: AUCTION_ADDRESS,
+                abi: AUCTION_ABI,
+                functionName: 'createAuction',
+                args: [
+                    formData.tokenAddress as `0x${string}`,
+                    parseUnits(formData.totalLots, 18),
+                    Number(formData.startTick),
+                    Number(formData.endTick),
+                    Number(formData.tickSize),
+                    BigInt(startTimestamp),
+                    BigInt(endTimestamp)
+                ]
+            });
+        } catch (err: any) {
+            console.error("Create auction error:", err);
+            toast({ type: 'error', title: 'Create Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
     const handleReset = () => {
@@ -217,19 +237,13 @@ export default function CreateAuction() {
                 backdropFilter: 'blur(20px)',
                 borderBottom: '1px solid rgba(255, 215, 0, 0.1)'
             }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    height: '80px',
-                    maxWidth: '1400px',
-                    margin: '0 auto',
-                    padding: '0 24px'
-                }}>
+                <div className="nav-content">
                     <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', textDecoration: 'none', fontSize: '14px' }}>
                         <span className="cyber-button" style={{ padding: '4px 12px', fontSize: '16px' }}>&lt; BACK</span>
                     </Link>
-                    <ConnectButton />
+                    <div className="nav-connect-wrapper">
+                        <ConnectButton />
+                    </div>
                 </div>
             </nav>
 

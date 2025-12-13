@@ -1,6 +1,6 @@
 # Auction Logic Explanation
 
-This document explains the core mechanics of the **Sealed-Bid Dutch Auction** used in CipherLaunch.
+This document explains the core mechanics of the **Sealed-Bid Dutch Auction** used in ZipherLaunch.
 
 ## 1. The Dutch Auction Component
 In a traditional Dutch Auction, the price starts high and drops over time. The first person to bid wins.

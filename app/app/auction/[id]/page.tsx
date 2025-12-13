@@ -91,7 +91,7 @@ export default function AuctionDetail({ params }: PageProps) {
     const { address, isConnected } = useAccount();
     const { data: walletClient } = useWalletClient();
     const { instance, isInitialized: fheReady, status: fheStatus } = useFhevm();
-    const { encrypt, decrypt, toast } = useToast();
+    const { encrypt, decrypt, dismiss, toast } = useToast();
 
     const [bidQty, setBidQty] = useState('');
     const [bidPriceTick, setBidPriceTick] = useState('');
@@ -287,7 +287,7 @@ export default function AuctionDetail({ params }: PageProps) {
         : null;
 
     // Handle cUSDC approval
-    const handleApprove = () => {
+    const handleApprove = async () => {
         if (!bidQty || !bidPriceTick || !auction) {
             toast({ type: 'error', title: 'Missing Fields', message: 'Enter price tick and quantity first' });
             return;
@@ -298,12 +298,19 @@ export default function AuctionDetail({ params }: PageProps) {
         const until = Math.floor(Date.now() / 1000) + 86400; // 1 day from now
 
         setCurrentAction('approve');
-        writeContract({
-            address: CUSDC_ADDRESS,
-            abi: CUSDC_ABI,
-            functionName: 'setOperator',
-            args: [AUCTION_ADDRESS, until]
-        });
+        try {
+            await writeContractAsync({
+                address: CUSDC_ADDRESS,
+                abi: CUSDC_ABI,
+                functionName: 'setOperator',
+                args: [AUCTION_ADDRESS, until]
+            });
+        } catch (err: any) {
+            console.error("Approve error:", err);
+            toast({ type: 'error', title: 'Approval Cancelled', message: err.shortMessage || err.message || 'Transaction rejected' });
+            if (encryptToastId) dismiss(encryptToastId);
+            setCurrentAction(null);
+        }
     };
 
     // Effect to track approval success
@@ -397,11 +404,12 @@ export default function AuctionDetail({ params }: PageProps) {
                 ]
             });
 
-        } catch (e) {
+        } catch (e: any) {
             console.error('Bid error:', e);
             setEncryptionStatus('error');
-            decrypt(toastId, false, '✕ BID FAILED', e instanceof Error ? e.message : 'Unknown error');
-            toast({ type: 'error', title: 'Bid Failed', message: e instanceof Error ? e.message : 'Unknown error' });
+            decrypt(toastId, false, '✕ BID FAILED', e.shortMessage || e.message || 'Unknown error');
+            toast({ type: 'error', title: 'Bid Failed', message: e.shortMessage || e.message || 'Unknown error' });
+            setCurrentAction(null);
         } finally {
             setIsEncrypting(false);
             setEncryptToastId(null);
@@ -413,41 +421,122 @@ export default function AuctionDetail({ params }: PageProps) {
     const [bidHistory, setBidHistory] = useState<any[]>([]);
 
     useEffect(() => {
-        if (!publicClient || !id) return;
+        if (!publicClient || !id || !auction) return;
 
         const fetchHistory = async () => {
             try {
-                // Fetch recent logs (last 1000 blocks to comply with RPC limit)
                 const currentBlock = await publicClient.getBlockNumber();
-                const fromBlock = currentBlock - 1000n > 0n ? currentBlock - 1000n : 0n;
 
-                // Fetch ALL bids for this auction to get latest price
-                const allLogs = await publicClient.getLogs({
-                    address: AUCTION_ADDRESS,
-                    event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick)'),
-                    args: {
-                        auctionId: BigInt(id)
-                    },
-                    fromBlock: fromBlock
-                });
+                // --- Simple Caching Start ---
+                const cacheKey = `auction_logs_${id}`;
+                let cachedLogs: any[] = [];
+                let lastCachedBlock = 0n;
 
-                // Set latest bid tick from most recent event and find highest bid
-                if (allLogs.length > 0) {
-                    const lastLog = allLogs[allLogs.length - 1];
+                try {
+                    const saved = localStorage.getItem(cacheKey);
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        // Convert stringified BigInts back if needed, mainly blockNumber
+                        cachedLogs = parsed.map((log: any) => ({
+                            ...log,
+                            blockNumber: BigInt(log.blockNumber),
+                            // Ensure args are accessible
+                            args: log.args
+                        }));
+                        if (cachedLogs.length > 0) {
+                            lastCachedBlock = cachedLogs[cachedLogs.length - 1].blockNumber;
+                            // Sort to be sure
+                            cachedLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber));
+                        }
+                    }
+                } catch (e) {
+                    console.error("Cache parse error", e);
+                }
+                // --- Simple Caching End ---
+
+                // Determine start block: if we have cache, start from lastCachedBlock + 1
+                // If no cache, use logic to estimate start time
+                let fromBlock = 0n;
+
+                if (lastCachedBlock > 0n) {
+                    fromBlock = lastCachedBlock + 1n;
+                } else {
+                    const now = BigInt(Math.floor(Date.now() / 1000));
+                    if (auction.startTime < now) {
+                        const secondsAgo = now - auction.startTime;
+                        // Add buffer of 1000 blocks
+                        const blocksAgo = (secondsAgo / 2n) + 1000n;
+                        fromBlock = currentBlock - blocksAgo;
+                    } else {
+                        fromBlock = currentBlock - 1000n;
+                    }
+                }
+
+                if (fromBlock < 0n) fromBlock = 0n;
+                // Don't fetch if fromBlock > currentBlock (up to date)
+
+                let newLogs: any[] = [];
+
+                if (fromBlock <= currentBlock) {
+                    // Chunked fetching to bypass RPC limits
+                    const CHUNK_SIZE = 1000n;
+
+                    for (let i = fromBlock; i <= currentBlock; i += CHUNK_SIZE) {
+                        const toBlock = (i + CHUNK_SIZE - 1n) < currentBlock ? (i + CHUNK_SIZE - 1n) : currentBlock;
+
+                        try {
+                            const logs = await publicClient.getLogs({
+                                address: AUCTION_ADDRESS,
+                                event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick)'),
+                                args: {
+                                    auctionId: BigInt(id)
+                                },
+                                fromBlock: i,
+                                toBlock: toBlock
+                            });
+                            newLogs.push(...logs);
+                            // Rate limit protection
+                            await new Promise(r => setTimeout(r, 100));
+                        } catch (err) {
+                            console.error(`Chunk fetch error ${i}-${toBlock}:`, err);
+                        }
+                    }
+                }
+
+                // Merge cache + new
+                const allLogs = [...cachedLogs, ...newLogs];
+                // Remove duplicates just in case (by transactionHash)
+                const uniqueLogs = Array.from(new Map(allLogs.map(log => [log.transactionHash, log])).values());
+                uniqueLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber));
+
+                // Update Cache
+                if (newLogs.length > 0) {
+                    // Need custom serializer for BigInt
+                    const serialized = JSON.stringify(uniqueLogs, (key, value) =>
+                        typeof value === 'bigint' ? value.toString() : value
+                    );
+                    localStorage.setItem(cacheKey, serialized);
+                }
+
+                if (uniqueLogs.length > 0) {
+                    const lastLog = uniqueLogs[uniqueLogs.length - 1];
                     if (lastLog.args.tick !== undefined) {
                         setLatestBidTick(Number(lastLog.args.tick));
                     }
 
                     // Find highest bid tick from all events
-                    const maxTick = Math.max(...allLogs.map(log => Number(log.args.tick || 0)));
+                    const maxTick = Math.max(...uniqueLogs.map(log => Number(log.args.tick || 0)));
                     if (maxTick > 0) {
                         setHighestBidTick(maxTick);
                     }
+                } else {
+                    setLatestBidTick(null);
+                    setHighestBidTick(null);
                 }
 
                 // Filter for user's bids only for history display
                 if (address) {
-                    const myLogs = allLogs.filter(log =>
+                    const myLogs = uniqueLogs.filter(log =>
                         log.args.bidder && log.args.bidder.toLowerCase() === address.toLowerCase()
                     );
                     setBidHistory(myLogs);
@@ -458,10 +547,10 @@ export default function AuctionDetail({ params }: PageProps) {
         };
 
         fetchHistory();
-        // Poll every 10s
-        const interval = setInterval(fetchHistory, 10000);
+        // Poll every 15s (slower than before to reduce load)
+        const interval = setInterval(fetchHistory, 15000);
         return () => clearInterval(interval);
-    }, [publicClient, address, id, isSuccess]); // Re-fetch on success
+    }, [publicClient, address, id, auction?.startTime, isSuccess]);
 
     return (
         <div style={{ minHeight: '100vh', paddingBottom: '100px' }}>
@@ -477,19 +566,13 @@ export default function AuctionDetail({ params }: PageProps) {
                 backdropFilter: 'blur(20px)',
                 borderBottom: '1px solid rgba(255, 215, 0, 0.1)'
             }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    height: '80px',
-                    maxWidth: '1400px',
-                    margin: '0 auto',
-                    padding: '0 24px'
-                }}>
+                <div className="nav-content">
                     <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', textDecoration: 'none', fontSize: '14px' }}>
                         <span className="cyber-button" style={{ padding: '4px 12px', fontSize: '16px' }}>&lt; BACK</span>
                     </Link>
-                    <ConnectButton />
+                    <div className="nav-connect-wrapper">
+                        <ConnectButton />
+                    </div>
                 </div>
             </nav>
 
@@ -502,7 +585,7 @@ export default function AuctionDetail({ params }: PageProps) {
                         </div>
                     </div>
                 ) : auctionData ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 450px', gap: '60px' }}>
+                    <div className="auction-layout-grid">
                         {/* Left Column - Info */}
                         <div className="neon-card" style={{ padding: '40px', borderRadius: '16px' }}>
                             <div style={{ marginBottom: '40px' }}>
@@ -520,11 +603,9 @@ export default function AuctionDetail({ params }: PageProps) {
                                         Auction #{id}
                                     </span>
                                 </div>
-                                <h1 className="glitch-hover" style={{
-                                    fontSize: '56px',
+                                <h1 className="glitch-hover heading-responsive" style={{
                                     fontWeight: 800,
                                     marginBottom: '24px',
-                                    lineHeight: 1.1,
                                     color: '#fff',
                                     textTransform: 'uppercase',
                                     letterSpacing: '-1px'
@@ -545,7 +626,7 @@ export default function AuctionDetail({ params }: PageProps) {
                                     <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Auction Info</span>
                                     <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(255,215,0,0.3), transparent)' }}></div>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+                                <div className="stats-grid-4">
                                     {[
                                         { label: 'STATUS', value: getStatus(), color: getStatus() === 'LIVE' ? '#00FF64' : getStatus() === 'ENDED' ? '#FF6464' : getStatus() === 'UPCOMING' ? '#FFD700' : '#888' },
                                         { label: 'TOKEN', value: tokenSymbol || '...', color: 'var(--gold-primary)' },
@@ -574,7 +655,7 @@ export default function AuctionDetail({ params }: PageProps) {
                                     <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Bidding Activity</span>
                                     <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(0,191,255,0.3), transparent)' }}></div>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+                                <div className="grid-responsive" style={{ gap: '12px' }}>
                                     <div style={{
                                         background: 'linear-gradient(135deg, rgba(255,215,0,0.1) 0%, rgba(0,0,0,0.4) 100%)',
                                         padding: '20px',
@@ -611,7 +692,7 @@ export default function AuctionDetail({ params }: PageProps) {
                                     <span style={{ fontSize: '12px', color: '#888', letterSpacing: '2px', textTransform: 'uppercase' }}>Price Range & Schedule</span>
                                     <div style={{ flex: 1, height: '1px', background: 'linear-gradient(90deg, rgba(0,255,100,0.3), transparent)' }}></div>
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px' }}>
+                                <div className="stats-grid-5">
                                     {[
                                         { label: 'MIN PRICE', value: auction ? `$${(auction.endTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#00FF64', icon: '↓' },
                                         { label: 'MAX PRICE', value: auction ? `$${(auction.startTick * auction.tickSize / 1000000).toFixed(3)}` : '...', color: '#FF6464', icon: '↑' },

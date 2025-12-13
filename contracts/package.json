@@ -1,7 +1,7 @@
 {
-    "name": "cipherlaunch-contracts",
+    "name": "zipherlaunch-contracts",
     "version": "1.0.0",
-    "description": "CipherLaunch - Confidential Token Launchpad & Private Auctions powered by FHE",
+    "description": "ZipherLaunch - Confidential Token Launchpad & Private Auctions powered by FHE",
     "main": "index.js",
     "scripts": {
         "chain": "hardhat node --port 8545",

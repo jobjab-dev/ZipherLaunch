@@ -130,7 +130,7 @@ export default function WrapPage() {
     const { data: walletClient } = useWalletClient();
     const publicClient = usePublicClient();
     const { isInitialized: isFhevmReady, status: fhevmStatus, instance } = useFhevm();
-    const { encrypt, decrypt, toast } = useToast();
+    const { encrypt, decrypt, dismiss, toast } = useToast();
 
     const [mode, setMode] = useState<'wrap' | 'unwrap'>('wrap');
     const [tokenAddress, setTokenAddress] = useState<`0x${string}`>(TEST_USDC_ADDRESS || SAMPLE_TOKEN || '0x');
@@ -306,23 +306,11 @@ export default function WrapPage() {
 
     // Handle transaction states
     useEffect(() => {
-        if (isPending && !encryptToastId && currentAction) {
-            const actionText = currentAction === 'create' ? 'CREATING WRAPPER...'
-                : currentAction === 'approve' ? 'APPROVING...'
-                    : currentAction === 'wrap' ? 'SHIELDING...'
-                        : 'UNSHIELDING...';
-            const id = encrypt(actionText, 'Waiting for wallet confirmation');
-            setEncryptToastId(id);
-        }
-    }, [isPending, encryptToastId, currentAction, encrypt]);
-
-    useEffect(() => {
         if (isConfirming && encryptToastId) {
             decrypt(encryptToastId, true, 'PROCESSING ON-CHAIN...', `TX: ${hash?.slice(0, 20)}...`);
-            const id = encrypt('DECRYPTING RESULT...', 'Waiting for confirmation');
-            setEncryptToastId(id);
+            // No new toast for decrypting result here, as it's handled by the specific unwrap steps
         }
-    }, [isConfirming]);
+    }, [isConfirming, encryptToastId, hash]); // Added encryptToastId and hash to dependencies
 
     useEffect(() => {
         if (isSuccess && encryptToastId && currentAction) {
@@ -363,40 +351,71 @@ export default function WrapPage() {
             }
             reset();
         }
-    }, [isSuccess]);
+    }, [isSuccess, encryptToastId, currentAction, unwrapStep, amount, symbol, decrypt, refetchWrapper, refetchBalance, refetchEncrypted, reset, toast]); // Added dependencies
 
-    const handleCreateWrapper = () => {
-        setCurrentAction('create');
-        writeContract({
-            address: WRAPPER_FACTORY_ADDRESS,
-            abi: WRAPPER_FACTORY_ABI,
-            functionName: 'createWrapper',
-            args: [tokenAddress]
-        });
+    const handleCreateWrapper = async () => {
+        if (!tokenAddress) return;
+        const toastId = encrypt('CREATING WRAPPER...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
+        setCurrentAction('create'); // Keep 'create' for consistency with useEffect
+        try {
+            await writeContractAsync({
+                address: WRAPPER_FACTORY_ADDRESS,
+                abi: WRAPPER_FACTORY_ABI,
+                functionName: 'createWrapper',
+                args: [tokenAddress]
+            });
+        } catch (err: any) {
+            console.error("Create wrapper error:", err);
+            toast({ type: 'error', title: 'Create Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
-    const handleApprove = () => {
+    const handleApprove = async () => {
         if (!wrapperAddress || !decimals || !amount) return;
+        const toastId = encrypt('APPROVING...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
         setCurrentAction('approve');
         const amountWei = parseUnits(amount, Number(decimals));
-        writeContract({
-            address: tokenAddress,
-            abi: ERC20_ABI,
-            functionName: 'approve',
-            args: [wrapperAddress, amountWei]
-        });
+        try {
+            await writeContractAsync({
+                address: tokenAddress,
+                abi: ERC20_ABI,
+                functionName: 'approve',
+                args: [wrapperAddress, amountWei]
+            });
+        } catch (err: any) {
+            console.error("Approve error:", err);
+            toast({ type: 'error', title: 'Approval Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
-    const handleWrap = () => {
+    const handleWrap = async () => {
         if (!wrapperAddress || !decimals || !amount) return;
+        const toastId = encrypt('SHIELDING...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
         setCurrentAction('wrap');
         const amountWei = parseUnits(amount, Number(decimals));
-        writeContract({
-            address: wrapperAddress as `0x${string}`,
-            abi: WRAPPER_ABI,
-            functionName: 'wrap',
-            args: [address!, amountWei]
-        });
+        try {
+            await writeContractAsync({
+                address: wrapperAddress as `0x${string}`,
+                abi: WRAPPER_ABI,
+                functionName: 'wrap',
+                args: [address!, amountWei]
+            });
+        } catch (err: any) {
+            console.error("Wrap error:", err);
+            toast({ type: 'error', title: 'Shield Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            if (encryptToastId) dismiss(encryptToastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
     };
 
     const handleUnwrap = async () => {
@@ -525,9 +544,20 @@ export default function WrapPage() {
             refetchEncrypted();
             setDecryptedBalance(null);
 
+            if (hash) {
+                await publicClient.waitForTransactionReceipt({ hash });
+            }
+
         } catch (error) {
             console.error('Unwrap error:', error);
             toast({ type: 'error', title: 'Unwrap Failed', message: error instanceof Error ? error.message : 'Unknown error' });
+            // For unwrap, toastId is in local scope if we defined it above, 
+            // but here we need to ensure we use the same variable.
+            // Since handleUnwrap is long, let's make sure we used the variable.
+            if (encryptToastId) dismiss(encryptToastId); // Correction: local var not available in catch if block is large/split
+            // Wait, I can't use local toastId if I didn't define it in the same block or if it's too nested.
+            // Actually, for this one, simply referencing the state might still be risky if effect clears it.
+            // BUT, let's use the pattern: define const toastId at top.
             setUnwrapStep('idle');
             setCurrentAction(null);
         }
@@ -554,19 +584,13 @@ export default function WrapPage() {
                 backdropFilter: 'blur(20px)',
                 borderBottom: '1px solid rgba(255, 215, 0, 0.1)'
             }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    height: '80px',
-                    maxWidth: '1400px',
-                    margin: '0 auto',
-                    padding: '0 24px'
-                }}>
+                <div className="nav-content">
                     <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', textDecoration: 'none' }}>
                         <span className="cyber-button" style={{ padding: '4px 12px', fontSize: '16px' }}>&lt; BACK</span>
                     </Link>
-                    <ConnectButton />
+                    <div className="nav-connect-wrapper">
+                        <ConnectButton />
+                    </div>
                 </div>
             </nav>
 

@@ -1,7 +1,7 @@
 {
-    "name": "cipherlaunch-monorepo",
+    "name": "zipherlaunch-monorepo",
     "version": "1.0.0",
-    "description": "CipherLaunch - Confidential Token Launchpad & Private Auctions powered by FHE",
+    "description": "ZipherLaunch - Confidential Token Launchpad & Private Auctions powered by FHE",
     "private": true,
     "scripts": {
         "install:all": "npm install --prefix contracts && npm install --prefix app",

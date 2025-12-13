@@ -96,22 +96,100 @@ export default function AuctionCard({ id }: { id: number }) {
 
     // 3. Fetch Highest Bid using Logs
     useEffect(() => {
-        if (!publicClient || !AUCTION_ADDRESS) return;
+        if (!publicClient || !AUCTION_ADDRESS || !auction) return;
 
         const fetchHighestBid = async () => {
             try {
                 const currentBlock = await publicClient.getBlockNumber();
-                const fromBlock = currentBlock - BigInt(1000) > BigInt(0) ? currentBlock - BigInt(1000) : BigInt(0);
 
-                const logs = await publicClient.getLogs({
-                    address: AUCTION_ADDRESS,
-                    event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick)'),
-                    args: { auctionId: BigInt(id) },
-                    fromBlock: fromBlock
-                });
+                // --- Simple Caching Start ---
+                const cacheKey = `auction_logs_${id}`;
+                let cachedLogs: any[] = [];
+                let lastCachedBlock = BigInt(0);
 
-                if (logs.length > 0) {
-                    const maxTick = Math.max(...logs.map(log => Number(log.args.tick || 0)));
+                try {
+                    const saved = localStorage.getItem(cacheKey);
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        // Convert stringified BigInts back if needed
+                        cachedLogs = parsed.map((log: any) => ({
+                            ...log,
+                            blockNumber: BigInt(log.blockNumber),
+                            args: log.args
+                        }));
+                        if (cachedLogs.length > 0) {
+                            lastCachedBlock = cachedLogs[cachedLogs.length - 1].blockNumber;
+                            // Sort to be sure
+                            cachedLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber));
+                        }
+                    }
+                } catch (e) {
+                    console.error("Cache parse error", e);
+                }
+                // --- Simple Caching End ---
+
+                // Determine start block: if we have cache, start from lastCachedBlock + 1
+                let fromBlock = BigInt(0);
+
+                if (lastCachedBlock > BigInt(0)) {
+                    fromBlock = lastCachedBlock + BigInt(1);
+                } else {
+                    const now = BigInt(Math.floor(Date.now() / 1000));
+                    if (auction.startTime < now) {
+                        const secondsAgo = now - auction.startTime;
+                        // Add buffer. Using BigInt(1000) instead of literal to be safe for target < ES2020 if needed
+                        const blocksAgo = (secondsAgo / BigInt(2)) + BigInt(1000);
+                        fromBlock = currentBlock - blocksAgo;
+                    } else {
+                        fromBlock = currentBlock - BigInt(1000);
+                    }
+                }
+
+                if (fromBlock < BigInt(0)) fromBlock = BigInt(0);
+
+                let newLogs: any[] = [];
+
+                if (fromBlock <= currentBlock) {
+                    const CHUNK_SIZE = BigInt(1000);
+
+                    for (let i = fromBlock; i <= currentBlock; i += CHUNK_SIZE) {
+                        const toBlock = (i + CHUNK_SIZE - BigInt(1)) < currentBlock ? (i + CHUNK_SIZE - BigInt(1)) : currentBlock;
+
+                        try {
+                            const logs = await publicClient.getLogs({
+                                address: AUCTION_ADDRESS,
+                                event: parseAbiItem('event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick)'),
+                                args: {
+                                    auctionId: BigInt(id)
+                                },
+                                fromBlock: i,
+                                toBlock: toBlock
+                            });
+                            newLogs.push(...logs);
+                            // Rate limit protection
+                            await new Promise(r => setTimeout(r, 100));
+                        } catch (err) {
+                            console.error(`Chunk fetch error ${i}-${toBlock}:`, err);
+                        }
+                    }
+                }
+
+                // Merge cache + new
+                const allLogs = [...cachedLogs, ...newLogs];
+                // Remove duplicates by transactionHash
+                const uniqueLogs = Array.from(new Map(allLogs.map(log => [log.transactionHash, log])).values());
+
+                // Update Cache if we found new stuff
+                if (newLogs.length > 0) {
+                    // Custom serializer for BigInt
+                    const serialized = JSON.stringify(uniqueLogs, (key, value) =>
+                        typeof value === 'bigint' ? value.toString() : value
+                    );
+                    localStorage.setItem(cacheKey, serialized);
+                }
+
+                if (uniqueLogs.length > 0) {
+                    const maxTick = Math.max(...uniqueLogs.map(log => Number(log.args.tick || 0)));
                     if (maxTick > 0) {
                         setHighestBidTick(maxTick);
                     }
@@ -125,7 +203,7 @@ export default function AuctionCard({ id }: { id: number }) {
         // Poll infrequently for listing
         const interval = setInterval(fetchHighestBid, 15000);
         return () => clearInterval(interval);
-    }, [publicClient, id]);
+    }, [publicClient, id, auction]);
 
     // 4. Computed Values
     const getStatus = () => {
@@ -200,7 +278,7 @@ export default function AuctionCard({ id }: { id: number }) {
                         #{id.toString().padStart(4, '0')} • Sealed-Bid
                     </p>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+                    <div className="card-stats-grid">
                         {/* Supply Box */}
                         <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '8px' }}>
                             <div style={{ fontSize: '9px', color: '#666', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Total Supply</div>

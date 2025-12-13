@@ -14,6 +14,7 @@ interface ToastContextType {
     toast: (toast: Omit<Toast, 'id'>) => void;
     encrypt: (title: string, message?: string) => string;
     decrypt: (id: string, success: boolean, title: string, message?: string) => void;
+    dismiss: (id: string) => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -164,7 +165,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }, []);
 
     return (
-        <ToastContext.Provider value={{ toast, encrypt, decrypt }}>
+        <ToastContext.Provider value={{ toast, encrypt, decrypt, dismiss: removeToast }}>
             {children}
             {mounted && createPortal(
                 <div style={{

@@ -7,8 +7,8 @@ import { Providers } from './providers';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'CipherLaunch | Confidential Token Launchpad & Private Auctions',
-  description: 'CipherLaunch - Confidential Token Launchpad & Private Auctions powered by Fully Homomorphic Encryption (FHE)',
+  title: 'ZipherLaunch | Confidential Token Launchpad & Private Auctions',
+  description: 'ZipherLaunch - Confidential Token Launchpad & Private Auctions powered by Fully Homomorphic Encryption (FHE)',
 };
 
 export default function RootLayout({

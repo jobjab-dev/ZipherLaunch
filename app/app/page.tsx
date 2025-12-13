@@ -1,6 +1,7 @@
 'use client';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useState, useEffect } from 'react';
 import { useAccount, useWriteContract, useWaitForTransactionReceipt, useReadContract } from 'wagmi';
 import { formatUnits, parseUnits } from 'viem';
@@ -100,7 +101,7 @@ function Skeleton({ width = '100%', height = '20px' }: { width?: string; height?
 
 export default function Home() {
   const { address, isConnected } = useAccount();
-  const { encrypt, decrypt, toast } = useToast();
+  const { encrypt, decrypt, dismiss, toast } = useToast();
   const [auctions, setAuctions] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [currentAction, setCurrentAction] = useState<'smpl' | 'cusdc' | null>(null);
@@ -108,7 +109,7 @@ export default function Home() {
   const [cusdcAmount, setCusdcAmount] = useState('10000');
   const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
 
-  const { data: hash, isPending, writeContract, reset } = useWriteContract();
+  const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
 
   // Token balances
@@ -168,13 +169,7 @@ export default function Home() {
     fetchAuctions();
   }, [auctionCount]);
 
-  useEffect(() => {
-    if (isPending && !encryptToastId && currentAction) {
-      const text = currentAction === 'smpl' ? 'MINTING SMPL...' : 'MINTING USDC...';
-      const id = encrypt(text, 'Waiting for wallet confirmation');
-      setEncryptToastId(id);
-    }
-  }, [isPending, encryptToastId, currentAction, encrypt]);
+
 
   useEffect(() => {
     if (isConfirming && encryptToastId) {
@@ -201,26 +196,48 @@ export default function Home() {
     }
   }, [isSuccess]);
 
-  const handleMintSmpl = () => {
+  const handleMintSmpl = async () => {
     if (!address) return;
+    const toastId = encrypt('MINTING SMPL...', 'Waiting for wallet confirmation');
+    setEncryptToastId(toastId);
     setCurrentAction('smpl');
-    writeContract({
-      address: SAMPLE_TOKEN,
-      abi: ERC20_ABI,
-      functionName: 'mint',
-      args: [address, parseUnits(smplAmount, 18)]
-    });
+
+    try {
+      await writeContractAsync({
+        address: SAMPLE_TOKEN,
+        abi: ERC20_ABI,
+        functionName: 'mint',
+        args: [address, parseUnits(smplAmount, 18)]
+      });
+    } catch (err: any) {
+      console.error("Mint SMPL error:", err);
+      toast({ type: 'error', title: 'Mint Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+      dismiss(toastId);
+      setEncryptToastId(null);
+      setCurrentAction(null);
+    }
   };
 
-  const handleMintUsdc = () => {
+  const handleMintUsdc = async () => {
     if (!address) return;
+    const toastId = encrypt('MINTING USDC...', 'Waiting for wallet confirmation');
+    setEncryptToastId(toastId);
     setCurrentAction('cusdc');
-    writeContract({
-      address: TEST_USDC_ADDRESS,
-      abi: TEST_USDC_ABI,
-      functionName: 'mint',
-      args: [address, parseUnits(cusdcAmount, 6)]  // USDC uses 6 decimals
-    });
+
+    try {
+      await writeContractAsync({
+        address: TEST_USDC_ADDRESS,
+        abi: TEST_USDC_ABI,
+        functionName: 'mint',
+        args: [address, parseUnits(cusdcAmount, 6)]  // USDC uses 6 decimals
+      });
+    } catch (err: any) {
+      console.error("Mint USDC error:", err);
+      toast({ type: 'error', title: 'Mint Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+      dismiss(toastId);
+      setEncryptToastId(null);
+      setCurrentAction(null);
+    }
   };
 
   const isProcessing = isPending || isConfirming;
@@ -238,44 +255,29 @@ export default function Home() {
         backdropFilter: 'blur(20px)',
         borderBottom: '1px solid rgba(255, 215, 0, 0.1)'
       }}>
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          height: '80px',
-          maxWidth: '1400px',
-          margin: '0 auto',
-          padding: '0 24px'
-        }}>
+        <div className="nav-content">
           <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '12px', textDecoration: 'none' }}>
-            <div style={{
-              width: '40px',
-              height: '40px',
-              border: '2px solid var(--gold-primary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 15px rgba(255, 215, 0, 0.3)'
-            }}>
-              <span style={{ fontSize: '20px' }}>⚡</span>
+            <div className="logo-wrapper">
+              <Image
+                src="/ZipherLaunch_logo.png"
+                alt="Logo"
+                width={40}
+                height={40}
+                style={{ borderRadius: '8px', width: '100%', height: 'auto' }}
+              />
             </div>
-            <span style={{ fontSize: '24px', fontWeight: 800, color: '#fff', letterSpacing: '2px' }}>
-              CIPHER<span className="text-gold">LAUNCH</span>
+            <span className="logo-text" style={{ color: '#fff' }}>
+              ZIPHER<span className="text-gold">LAUNCH</span>
             </span>
           </Link>
-          <ConnectButton />
+          <div className="nav-connect-wrapper">
+            <ConnectButton />
+          </div>
         </div>
       </nav>
 
       {/* Hero Section */}
-      <section style={{
-        textAlign: 'center',
-        padding: '80px 20px 40px',
-        maxWidth: '1000px',
-        margin: '0 auto',
-        position: 'relative',
-        zIndex: 1
-      }}>
+      <section className="hero-section container-responsive" style={{ maxWidth: '1000px', margin: '0 auto' }}>
         <div style={{
           display: 'inline-block',
           marginBottom: '24px',
@@ -287,15 +289,14 @@ export default function Home() {
           padding: '8px 16px',
           letterSpacing: '2px',
           minHeight: '40px',
-          minWidth: '300px'
+          minWidth: '300px',
+          maxWidth: '100%'
         }}>
           <TypewriterText texts={[":: SYSTEM SECURE ::", ":: GOLD PROTOCOL ACTIVATED ::", ":: PRIVACY ENABLED ::"]} typingSpeed={50} pauseTime={2000} />
         </div>
 
-        <h1 className="glitch-hover" style={{
-          fontSize: 'clamp(42px, 5vw, 80px)',
+        <h1 className="glitch-hover heading-responsive" style={{
           fontWeight: 900,
-          lineHeight: 1,
           marginBottom: '24px',
           textTransform: 'uppercase',
           letterSpacing: '-2px',
@@ -305,10 +306,8 @@ export default function Home() {
           <span className="text-gold" style={{ textShadow: '0 0 40px rgba(255, 215, 0, 0.5)' }}>PRIVATE AUCTIONS</span>
         </h1>
 
-        <p style={{
-          fontSize: '18px',
+        <p className="subheading-responsive" style={{
           color: '#a0a0a0',
-          maxWidth: '600px',
           margin: '0 auto 32px',
           lineHeight: 1.6
         }}>
@@ -317,7 +316,7 @@ export default function Home() {
           Your bids remain <span className="text-gold" style={{ fontWeight: 'bold' }}>encrypted</span> until settlement.
         </p>
 
-        <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+        <div className="button-group-responsive">
           <Link href="/create" className="cyber-button" style={{
             padding: '16px 32px',
             fontSize: '16px',
@@ -343,7 +342,7 @@ export default function Home() {
       </section>
 
       {/* Shield Token Flow Section */}
-      <section style={{ padding: '20px 24px 60px', maxWidth: '900px', margin: '0 auto' }}>
+      <section className="container-responsive" style={{ paddingTop: '20px', paddingBottom: '60px', maxWidth: '900px' }}>
         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <h2 style={{ fontSize: '20px', color: 'var(--gold-primary)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '2px' }}>
             🪙 Get Test Tokens
@@ -353,7 +352,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px' }}>
+        <div className="grid-responsive" style={{ gap: '20px' }}>
           {/* Mint SMPL Card */}
           <div className="neon-card" style={{ padding: '20px', borderRadius: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
@@ -375,7 +374,7 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <div style={{ display: 'flex', gap: '10px' }}>
+            <div className="flex-responsive" style={{ gap: '10px' }}>
               <input
                 type="number"
                 value={smplAmount}
@@ -419,7 +418,7 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <div style={{ display: 'flex', gap: '10px' }}>
+            <div className="flex-responsive" style={{ gap: '10px' }}>
               <input
                 type="number"
                 value={cusdcAmount}
@@ -453,7 +452,7 @@ export default function Home() {
       </section>
 
       {/* Active Markets Section */}
-      <section style={{ padding: '40px 24px 60px', maxWidth: '1400px', margin: '0 auto' }}>
+      <section className="container-responsive" style={{ paddingBottom: '60px' }}>
         <div style={{
           borderLeft: '4px solid var(--gold-primary)',
           paddingLeft: '20px',
@@ -474,7 +473,7 @@ export default function Home() {
         </div>
 
         {isLoading ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '24px' }}>
+          <div className="grid-responsive">
             {[1, 2, 3].map((i) => (
               <div key={i} className="neon-card" style={{ height: '260px', padding: '24px' }}>
                 <Skeleton width="50px" height="50px" />
@@ -505,7 +504,7 @@ export default function Home() {
             </Link>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '24px' }}>
+          <div className="grid-responsive">
             {auctions.map((auction) => (
               <AuctionCard key={auction.id} id={auction.id} />
             ))}

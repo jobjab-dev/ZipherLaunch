@@ -40,7 +40,7 @@ const TOKEN_FACTORY_ADDRESS = process.env.NEXT_PUBLIC_TOKEN_FACTORY_ADDRESS as `
 
 export default function CreateTokenPage() {
     const { isConnected } = useAccount();
-    const { encrypt, decrypt, toast } = useToast();
+    const { encrypt, decrypt, dismiss, toast } = useToast();
     const publicClient = usePublicClient();
 
     const [name, setName] = useState('');
@@ -50,16 +50,11 @@ export default function CreateTokenPage() {
     const [createdToken, setCreatedToken] = useState<string | null>(null);
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
 
-    const { data: hash, isPending, writeContract, reset } = useWriteContract();
+    const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
     const { isLoading: isConfirming, isSuccess, data: receipt } = useWaitForTransactionReceipt({ hash });
 
     // Handle encryption animation
-    useEffect(() => {
-        if (isPending && !encryptToastId) {
-            const id = encrypt('ENCRYPTING TRANSACTION...', 'Waiting for wallet confirmation');
-            setEncryptToastId(id);
-        }
-    }, [isPending, encryptToastId, encrypt]);
+
 
     // Handle confirmation
     useEffect(() => {
@@ -68,7 +63,7 @@ export default function CreateTokenPage() {
             const newId = encrypt('DECRYPTING RESULT...', 'Waiting for confirmation');
             setEncryptToastId(newId);
         }
-    }, [isConfirming]);
+    }, [isConfirming, encryptToastId, decrypt, hash, encrypt]);
 
     // Handle success - get token address from logs
     useEffect(() => {
@@ -108,7 +103,7 @@ export default function CreateTokenPage() {
             }
             setEncryptToastId(null);
         }
-    }, [isSuccess, receipt]);
+    }, [isSuccess, receipt, encryptToastId, decrypt, toast, symbol, hash]);
 
     const handleCreate = async () => {
         if (!name || !symbol || !supply) {
@@ -116,16 +111,26 @@ export default function CreateTokenPage() {
             return;
         }
 
+        const toastId = encrypt('ENCRYPTING TRANSACTION...', 'Waiting for wallet confirmation');
+        setEncryptToastId(toastId);
+
         setCreatedToken(null);
         const dec = parseInt(decimals);
         const supplyWei = BigInt(supply) * BigInt(10 ** dec);
 
-        writeContract({
-            address: TOKEN_FACTORY_ADDRESS,
-            abi: TOKEN_FACTORY_ABI,
-            functionName: 'createToken',
-            args: [name, symbol, dec, supplyWei]
-        });
+        try {
+            await writeContractAsync({
+                address: TOKEN_FACTORY_ADDRESS,
+                abi: TOKEN_FACTORY_ABI,
+                functionName: 'createToken',
+                args: [name, symbol, dec, supplyWei]
+            });
+        } catch (err: any) {
+            console.error("Create token error:", err);
+            toast({ type: 'error', title: 'Create Failed', message: err.shortMessage || err.message || 'Transaction rejected' });
+            dismiss(toastId);
+            setEncryptToastId(null);
+        }
     };
 
     const handleReset = () => {
@@ -151,19 +156,13 @@ export default function CreateTokenPage() {
                 backdropFilter: 'blur(20px)',
                 borderBottom: '1px solid rgba(255, 215, 0, 0.1)'
             }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    height: '80px',
-                    maxWidth: '1400px',
-                    margin: '0 auto',
-                    padding: '0 24px'
-                }}>
+                <div className="nav-content">
                     <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', textDecoration: 'none' }}>
                         <span className="cyber-button" style={{ padding: '4px 12px', fontSize: '16px' }}>&lt; BACK</span>
                     </Link>
-                    <ConnectButton />
+                    <div className="nav-connect-wrapper">
+                        <ConnectButton />
+                    </div>
                 </div>
             </nav>
 

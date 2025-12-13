@@ -1,6 +1,6 @@
 # 📖 User Flow Guide
 
-This guide walks you through the complete lifecycle of using **CipherLaunch**, from setting up your wallet to participating in a confidential auction.
+This guide walks you through the complete lifecycle of using **ZipherLaunch**, from setting up your wallet to participating in a confidential auction.
 
 ---
 
