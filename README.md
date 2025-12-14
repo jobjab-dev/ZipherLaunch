@@ -2,6 +2,9 @@
 
 **Confidential Token Launchpad & Private Auctions** - Powered by FHE (Fully Homomorphic Encryption)
 
+[![Video Demo](https://img.shields.io/badge/📺_Video_Demo-YouTube-red?style=for-the-badge)](https://youtu.be/Cxb1vRt0ATw)
+[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-Vercel-black?style=for-the-badge)](https://zipher-launch.vercel.app/)
+
 ## ℹ️ About
 
 **ZipherLaunch** is a next-generation decentralized launchpad and auction platform built on **FHE (Fully Homomorphic Encryption)**.
