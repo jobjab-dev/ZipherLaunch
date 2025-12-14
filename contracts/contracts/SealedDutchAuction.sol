@@ -6,10 +6,11 @@ import { ZamaEthereumConfig } from "@fhevm/solidity/config/ZamaConfig.sol";
 import { IERC7984 } from "@openzeppelin/confidential-contracts/interfaces/IERC7984.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-interface IGateway {
-    function requestDecryption(uint256[] calldata ctsHandles, bytes4 callbackSelector, uint256 msgValue, uint256 maxTimestamp, bool passSignaturesToCaller) external returns (uint256);
-}
-
+/**
+ * @title SealedDutchAuction - v0.9 Compatible
+ * @notice Uses self-relaying decryption pattern (no Oracle)
+ * @dev Frontend must call publicDecrypt() then submit result + proof
+ */
 contract SealedDutchAuction is ZamaEthereumConfig {
     struct Auction {
         address seller;
@@ -22,6 +23,7 @@ contract SealedDutchAuction is ZamaEthereumConfig {
         uint256 endTime;
         bool finalized;
         uint32 clearingTick;
+        uint256 clearingTickHandle; // Handle for decryption
     }
 
     struct Bid {
@@ -31,11 +33,6 @@ contract SealedDutchAuction is ZamaEthereumConfig {
         euint64 paidEnc;
         bool claimed;
     }
-    
-    struct ClaimContext {
-        uint256 auctionId;
-        uint256 bidIndex;
-    }
 
     uint256 public auctionCount;
     mapping(uint256 => Auction) public auctions;
@@ -43,18 +40,16 @@ contract SealedDutchAuction is ZamaEthereumConfig {
     mapping(uint256 => mapping(uint32 => euint64)) public auctionTickDemand;
 
     IERC7984 public paymentToken;  // Confidential wrapped stablecoin (ERC7984)
-    address public gateway;
-
-    mapping(uint256 => uint256) public finalizeRequests;
-    mapping(uint256 => ClaimContext) public claimRequests;
 
     event AuctionCreated(uint256 indexed auctionId, address seller, address token);
     event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint32 tick);
+    event FinalizeReady(uint256 indexed auctionId, uint256 clearingTickHandle);
     event AuctionFinalized(uint256 indexed auctionId, uint32 clearingTick);
+    event ClaimReady(uint256 indexed auctionId, uint256 indexed bidIndex, uint256 lotsHandle);
+    event ClaimProcessed(uint256 indexed auctionId, uint256 indexed bidIndex, uint64 lots);
 
-    constructor(address _paymentToken, address _gateway) {
+    constructor(address _paymentToken) {
         paymentToken = IERC7984(_paymentToken);
-        gateway = _gateway;
     }
 
     function createAuction(
@@ -76,7 +71,8 @@ contract SealedDutchAuction is ZamaEthereumConfig {
             startTime: _startTime,
             endTime: _endTime,
             finalized: false,
-            clearingTick: 0
+            clearingTick: 0,
+            clearingTickHandle: 0
         });
 
         IERC20(_tokenSold).transferFrom(msg.sender, address(this), _totalLots);
@@ -120,41 +116,83 @@ contract SealedDutchAuction is ZamaEthereumConfig {
         emit BidPlaced(auctionId, msg.sender, tick);
     }
 
+    /**
+     * @notice Step 1: Calculate clearing tick and mark for public decryption
+     * @dev Frontend must then call publicDecrypt() + submitFinalizeResult()
+     */
     function requestFinalize(uint256 auctionId) external {
         Auction storage auc = auctions[auctionId];
         require(!auc.finalized, "Already finalized");
+        require(auc.clearingTickHandle == 0, "Already requested");
         // require(block.timestamp > auc.endTime, "Not ended"); // Commented for testing
 
         euint64 cumulative = FHE.asEuint64(0);
         euint64 supply = FHE.asEuint64(uint64(auc.totalLots));
+        // Default to endTick (min price) - means if undersold, everyone wins at min price
+        // If demand >= supply, this will be overwritten with actual clearing tick
         ebool found = FHE.asEbool(false);
-        euint32 finalTick = FHE.asEuint32(auc.startTick); 
+        euint32 finalTick = FHE.asEuint32(auc.endTick); 
         
-        for (uint32 t = auc.startTick; t >= auc.endTick; t--) {
+        // Safe loop (handles t=0 case)
+        uint32 t = auc.startTick; 
+        while (true) {
              euint64 demandAtTick = auctionTickDemand[auctionId][t];
-             cumulative = FHE.add(cumulative, demandAtTick);
-             ebool isSat = FHE.ge(cumulative, supply);
-             ebool isNew = FHE.and(isSat, FHE.not(found));
-             finalTick = FHE.select(isNew, FHE.asEuint32(t), finalTick);
-             found = FHE.or(found, isSat);
+             
+             // Optimization: Skip empty ticks (uninitialized handles are 0)
+             if (euint64.unwrap(demandAtTick) != 0) {
+                 cumulative = FHE.add(cumulative, demandAtTick);
+                 
+                 ebool isSat = FHE.ge(cumulative, supply);
+                 ebool isNew = FHE.and(isSat, FHE.not(found));
+                 finalTick = FHE.select(isNew, FHE.asEuint32(t), finalTick);
+                 found = FHE.or(found, isSat);
+             }
+
+             if (t == auc.endTick) {
+                 break;
+             }
+             t--;
         }
-        FHE.allowThis(finalTick);
-
-        uint256[] memory cts = new uint256[](1);
-        cts[0] = uint256(euint32.unwrap(finalTick));
-        uint256 reqId = IGateway(gateway).requestDecryption(cts, this.onFinalizeCallback.selector, 0, block.timestamp + 100, false);
         
-        finalizeRequests[reqId] = auctionId;
+        // Mark for public decryption (v0.9 pattern)
+        FHE.allowThis(finalTick);
+        FHE.makePubliclyDecryptable(finalTick);
+        
+        uint256 handle = uint256(euint32.unwrap(finalTick));
+        auc.clearingTickHandle = handle;
+        
+        emit FinalizeReady(auctionId, handle);
     }
 
-    function onFinalizeCallback(uint256 requestId, uint256 decryptedTick) external {
-        uint256 auctionId = finalizeRequests[requestId];
+    /**
+     * @notice Step 2: Submit decrypted clearing tick
+     * @param auctionId The auction ID
+     * @param clearingTick The decrypted clearing tick value
+     * @dev Seller-only for security. Frontend calls publicDecrypt() first.
+     */
+    function submitFinalizeResult(
+        uint256 auctionId, 
+        uint32 clearingTick
+    ) external {
         Auction storage auc = auctions[auctionId];
-        auc.clearingTick = uint32(decryptedTick);
+        require(msg.sender == auc.seller, "Only seller");
+        require(!auc.finalized, "Already finalized");
+        require(auc.clearingTickHandle != 0, "Not requested");
+        
+        // NOTE: In production, verify decryption proof on-chain.
+        // For testnet, we trust the seller to submit correct value.
+        // The value is publicly decryptable, so anyone can verify off-chain.
+        
+        auc.clearingTick = clearingTick;
         auc.finalized = true;
-        emit AuctionFinalized(auctionId, uint32(decryptedTick));
+        
+        emit AuctionFinalized(auctionId, clearingTick);
     }
 
+    /**
+     * @notice Claim tokens/refund after auction is finalized
+     * @dev For losers: immediate refund. For winners: needs decryption of lots.
+     */
     function requestClaim(uint256 auctionId, uint256 bidIndex) external {
         Auction storage auc = auctions[auctionId];
         require(auc.finalized, "Not finalized");
@@ -169,46 +207,59 @@ contract SealedDutchAuction is ZamaEthereumConfig {
              return;
         }
 
-        // Won: Request decryption
-        uint256[] memory cts = new uint256[](1);
-        cts[0] = uint256(euint64.unwrap(bid.lotsEnc));
+        // Won: Mark lots for public decryption
+        FHE.makePubliclyDecryptable(bid.lotsEnc);
+        uint256 handle = uint256(euint64.unwrap(bid.lotsEnc));
         
-        uint256 reqId = IGateway(gateway).requestDecryption(cts, this.onClaimCallback.selector, 0, block.timestamp + 100, false);
-        
-        claimRequests[reqId] = ClaimContext({
-            auctionId: auctionId,
-            bidIndex: bidIndex
-        });
-        bid.claimed = true; // Mark claimed to prevent re-entry per request
+        emit ClaimReady(auctionId, bidIndex, handle);
     }
 
-    function onClaimCallback(uint256 requestId, uint256 decryptedLots) external {
-        ClaimContext memory ctx = claimRequests[requestId];
-        Auction storage auc = auctions[ctx.auctionId];
-        Bid storage bid = auctionBids[ctx.auctionId][ctx.bidIndex];
-
-        // Refund Diff
+    /**
+     * @notice Submit decrypted lots to complete claim
+     * @dev Bidder-only. Frontend calls publicDecrypt() first.
+     */
+    function submitClaimResult(
+        uint256 auctionId,
+        uint256 bidIndex,
+        uint64 decryptedLots
+    ) external {
+        Auction storage auc = auctions[auctionId];
+        Bid storage bid = auctionBids[auctionId][bidIndex];
+        require(msg.sender == bid.bidder, "Not bidder");
+        require(!bid.claimed, "Claimed");
+        require(bid.tick >= auc.clearingTick, "Loser should use requestClaim");
+        
+        // NOTE: In production, verify decryption proof on-chain.
+        // For testnet, we trust the bidder to submit correct value.
+        
+        bid.claimed = true;
+        
+        // Refund price difference
         uint64 diff = uint64(bid.tick - auc.clearingTick);
         uint64 refundScalar = diff * uint64(auc.tickSize);
         euint64 refundEnc = FHE.mul(bid.lotsEnc, refundScalar);
         FHE.allowThis(refundEnc);
+        FHE.allow(refundEnc, address(paymentToken));
             
         paymentToken.confidentialTransfer(bid.bidder, refundEnc);
             
-        // Transfer Public Token
-        IERC20(auc.tokenSold).transfer(bid.bidder, uint64(decryptedLots));
+        // Transfer tokens
+        IERC20(auc.tokenSold).transfer(bid.bidder, decryptedLots);
         
-        delete claimRequests[requestId];
+        emit ClaimProcessed(auctionId, bidIndex, decryptedLots);
     }
-}
-
-contract MockGateway {
-    uint256 public nextReqId;
-    function requestDecryption(uint256[] calldata, bytes4, uint256, uint256, bool) external returns (uint256) {
-        return nextReqId++;
+    
+    // View helpers
+    function getBidCount(uint256 auctionId) external view returns (uint256) {
+        return auctionBids[auctionId].length;
     }
-    function fulfillRequest(address target, bytes4 selector, uint256 reqId, uint256 val) external {
-        (bool success, ) = target.call(abi.encodeWithSelector(selector, reqId, val));
-        require(success, "Callback failed");
+    
+    function getBid(uint256 auctionId, uint256 bidIndex) external view returns (
+        address bidder,
+        uint32 tick,
+        bool claimed
+    ) {
+        Bid storage bid = auctionBids[auctionId][bidIndex];
+        return (bid.bidder, bid.tick, bid.claimed);
     }
 }

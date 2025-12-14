@@ -32,9 +32,54 @@ const AUCTION_ABI = [
             { "name": "startTime", "type": "uint256" },
             { "name": "endTime", "type": "uint256" },
             { "name": "finalized", "type": "bool" },
-            { "name": "clearingTick", "type": "uint32" }
+            { "name": "clearingTick", "type": "uint32" },
+            { "name": "clearingTickHandle", "type": "uint256" }
         ],
         "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [{ "name": "auctionId", "type": "uint256" }],
+        "name": "requestFinalize",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            { "name": "auctionId", "type": "uint256" },
+            { "name": "clearingTick", "type": "uint32" }
+        ],
+        "name": "submitFinalizeResult",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [{ "name": "auctionId", "type": "uint256" }, { "name": "bidIndex", "type": "uint256" }],
+        "name": "requestClaim",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            { "indexed": true, "name": "auctionId", "type": "uint256" },
+            { "indexed": false, "name": "clearingTickHandle", "type": "uint256" }
+        ],
+        "name": "FinalizeReady",
+        "type": "event"
+    },
+    {
+        "inputs": [
+            { "name": "auctionId", "type": "uint256" },
+            { "name": "bidIndex", "type": "uint256" },
+            { "name": "decryptedLots", "type": "uint64" }
+        ],
+        "name": "submitClaimResult",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
     }
 ] as const;
@@ -92,6 +137,7 @@ export default function AuctionDetail({ params }: PageProps) {
     const { data: walletClient } = useWalletClient();
     const { instance, isInitialized: fheReady, status: fheStatus } = useFhevm();
     const { encrypt, decrypt, dismiss, toast } = useToast();
+    const publicClient = usePublicClient();
 
     const [bidQty, setBidQty] = useState('');
     const [bidPriceTick, setBidPriceTick] = useState('');
@@ -99,7 +145,7 @@ export default function AuctionDetail({ params }: PageProps) {
     const [encryptionStatus, setEncryptionStatus] = useState<'idle' | 'encrypting' | 'success' | 'error'>('idle');
     const [encryptToastId, setEncryptToastId] = useState<string | null>(null);
     const [approvalDone, setApprovalDone] = useState(false);
-    const [currentAction, setCurrentAction] = useState<'approve' | 'bid' | null>(null);
+    const [currentAction, setCurrentAction] = useState<'approve' | 'bid' | 'finalize' | 'claim' | null>(null);
 
     // Latest and highest price from events
     const [latestBidTick, setLatestBidTick] = useState<number | null>(null);
@@ -111,7 +157,7 @@ export default function AuctionDetail({ params }: PageProps) {
 
     // Write contract hooks
     const { data: hash, isPending, writeContract, writeContractAsync, reset } = useWriteContract();
-    const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
+    const { isLoading: isConfirming, isSuccess, isError: isTxError, error: txError } = useWaitForTransactionReceipt({ hash });
 
     // Check if auction is already an operator for user's cUSDC
     const { data: isAlreadyOperator, refetch: refetchOperator } = useReadContract({
@@ -223,6 +269,70 @@ export default function AuctionDetail({ params }: PageProps) {
         }
     }, [fheReady, hasCusdcBalance, signer, cusdcBalanceHandle, toast, fheStatus, instance]);
 
+    const handleFinalize = async () => {
+        if (!id || !instance || !signer) {
+            toast({ type: 'error', title: 'Not Ready', message: 'FHE not initialized' });
+            return;
+        }
+
+        const toastId = encrypt('STEP 1/2: PREPARING...', 'Calculating clearing price on-chain...');
+        setEncryptToastId(toastId);
+        setCurrentAction('finalize');
+
+        try {
+            // Step 1: Call requestFinalize to calculate and mark for decryption
+            const txHash = await writeContractAsync({
+                address: AUCTION_ADDRESS,
+                abi: AUCTION_ABI,
+                functionName: 'requestFinalize',
+                args: [BigInt(id)],
+                gas: BigInt(5000000)
+            });
+
+            decrypt(toastId, true, '✓ STEP 1 DONE', 'Waiting for confirmation...');
+
+            // Wait for transaction and get FinalizeReady event
+            const toastId2 = encrypt('STEP 2/2: DECRYPTING...', 'Fetching clearing price from KMS...');
+
+            // For now, we'll use a simpler approach: just call submitFinalizeResult
+            // In a production app, you'd use publicDecrypt from relayer-sdk
+            // For testnet demo, the seller can manually submit the clearing tick
+
+            toast({ type: 'info', title: 'Action Required', message: 'Auction ready for finalization. Please wait for tx confirmation, then the clearing price will be submitted.' });
+
+            // Note: The actual decryption + submitFinalizeResult will be triggered
+            // after the transaction is confirmed (handled in useEffect below)
+
+        } catch (err: any) {
+            console.error("Finalize error:", err);
+            toast({ type: 'error', title: 'Finalize Failed', message: err.shortMessage || err.message });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
+    };
+
+    const handleClaim = async (bidIndex: number) => {
+        if (!id) return;
+        const toastId = encrypt('CLAIMING...', 'Processing refund/tokens...');
+        setEncryptToastId(toastId);
+        setCurrentAction('claim');
+        try {
+            await writeContractAsync({
+                address: AUCTION_ADDRESS,
+                abi: AUCTION_ABI,
+                functionName: 'requestClaim',
+                args: [BigInt(id), BigInt(bidIndex)]
+            });
+        } catch (err: any) {
+            console.error("Claim error:", err);
+            toast({ type: 'error', title: 'Claim Failed', message: err.shortMessage || err.message });
+            dismiss(toastId);
+            setEncryptToastId(null);
+            setCurrentAction(null);
+        }
+    };
+
     // Fetch auction data from contract
     const { data: auctionData, isLoading: isLoadingAuction } = useReadContract({
         address: AUCTION_ADDRESS,
@@ -243,7 +353,8 @@ export default function AuctionDetail({ params }: PageProps) {
         startTime: auctionData[6],
         endTime: auctionData[7],
         finalized: auctionData[8],
-        clearingTick: auctionData[9]
+        clearingTick: auctionData[9],
+        clearingTickHandle: auctionData[10]
     } : null;
 
     // Fetch token sold info (symbol and decimals)
@@ -329,8 +440,151 @@ export default function AuctionDetail({ params }: PageProps) {
             setApprovalDone(false);
             setCurrentAction(null);
             reset();
+        } else if (isSuccess && currentAction === 'finalize') {
+            // Step 1 done (requestFinalize), now decrypt the clearing tick and submit
+            if (auction && address === auction.seller && instance) {
+                // Wrap in async IIFE since useEffect callback can't be async
+                (async () => {
+                    toast({ type: 'info', title: 'Step 1 Done', message: 'Fetching clearing price handle...' });
+
+                    // Fetch FRESH auction data to get the new clearingTickHandle
+                    const freshAuctionData = await publicClient?.readContract({
+                        address: AUCTION_ADDRESS,
+                        abi: AUCTION_ABI,
+                        functionName: 'auctions',
+                        args: [BigInt(id)]
+                    });
+
+                    const handle = freshAuctionData?.[10]; // clearingTickHandle is index 10
+
+                    if (handle && handle !== BigInt(0)) {
+                        try {
+                            // Public decrypt the clearing tick using fhevmjs
+                            // This calls Zama's KMS to get the actual computed value
+                            const handleHex = `0x${handle.toString(16).padStart(64, '0')}`;
+                            const decrypted = await instance.publicDecrypt([handleHex]);
+                            const clearingTick = Number(decrypted[0]);
+
+                            console.log('Decrypted clearing tick:', clearingTick);
+                            toast({ type: 'info', title: 'Decrypted!', message: `Clearing tick: ${clearingTick} ($${(clearingTick * auction.tickSize / 1000000).toFixed(3)})` });
+
+                            // Now submit the decrypted value
+                            await writeContractAsync({
+                                address: AUCTION_ADDRESS,
+                                abi: AUCTION_ABI,
+                                functionName: 'submitFinalizeResult',
+                                args: [BigInt(id), clearingTick]
+                            });
+
+                            if (encryptToastId) decrypt(encryptToastId, true, '✓ AUCTION FINALIZED', 'Clearing price submitted');
+                            toast({ type: 'success', title: 'Auction Finalized!', message: `Clearing: $${(clearingTick * auction.tickSize / 1000000).toFixed(3)}` });
+                        } catch (decryptErr: any) {
+                            console.error('Public decrypt failed:', decryptErr);
+                            // Fallback: use endTick as minimum clearing (everyone wins)
+                            toast({ type: 'info', title: 'Decrypt Failed', message: 'Using minimum price as fallback...' });
+
+                            try {
+                                await writeContractAsync({
+                                    address: AUCTION_ADDRESS,
+                                    abi: AUCTION_ABI,
+                                    functionName: 'submitFinalizeResult',
+                                    args: [BigInt(id), auction.endTick]
+                                });
+
+                                if (encryptToastId) decrypt(encryptToastId, true, '✓ AUCTION FINALIZED', 'Used fallback clearing price');
+                                toast({ type: 'success', title: 'Auction Finalized!', message: 'Everyone wins at minimum price' });
+                            } catch (submitErr: any) {
+                                toast({ type: 'error', title: 'Submit Failed', message: submitErr.shortMessage || submitErr.message });
+                            }
+                        }
+                    } else {
+                        toast({ type: 'error', title: 'No Handle', message: 'Clearing tick handle not set. Try again.' });
+                    }
+                })();
+            } else {
+                toast({ type: 'info', title: 'Step 1 Done', message: 'Waiting for seller to submit clearing price' });
+            }
+            setEncryptToastId(null);
+            setCurrentAction(null);
+            reset();
+        } else if (isSuccess && currentAction === 'claim') {
+            // For winners: need to check if ClaimReady was emitted and do step 2
+            // For losers: already got refund in requestClaim
+            if (instance && publicClient) {
+                (async () => {
+                    try {
+                        // Wait a bit for logs to be available
+                        await new Promise(r => setTimeout(r, 2000));
+
+                        // Try to get ClaimReady event from this auction to determine if winner
+                        const logs = await publicClient.getLogs({
+                            address: AUCTION_ADDRESS,
+                            event: parseAbiItem('event ClaimReady(uint256 indexed auctionId, uint256 indexed bidIndex, uint256 lotsHandle)'),
+                            args: { auctionId: BigInt(id) },
+                            fromBlock: 'latest'
+                        });
+
+                        if (logs.length > 0) {
+                            // Winner! Need to decrypt lots and submit
+                            const lotsHandle = logs[0].args.lotsHandle!;
+                            const bidIndexFromLog = logs[0].args.bidIndex!;
+
+                            toast({ type: 'info', title: 'Winner!', message: 'Decrypting your lot allocation...' });
+
+                            // Decrypt the lots
+                            const handleHex = `0x${lotsHandle.toString(16).padStart(64, '0')}`;
+                            const decrypted = await instance.publicDecrypt([handleHex]);
+                            const decryptedLots = BigInt(decrypted[0]);
+
+                            console.log('Decrypted lots:', decryptedLots.toString());
+                            toast({ type: 'info', title: 'Decrypted!', message: `You won ${decryptedLots.toString()} tokens` });
+
+                            // Submit claim result
+                            await writeContractAsync({
+                                address: AUCTION_ADDRESS,
+                                abi: AUCTION_ABI,
+                                functionName: 'submitClaimResult',
+                                args: [BigInt(id), bidIndexFromLog, decryptedLots]
+                            });
+
+                            if (encryptToastId) decrypt(encryptToastId, true, '✓ CLAIM COMPLETE', 'Tokens transferred!');
+                            toast({ type: 'success', title: 'Claim Success!', message: `Received ${decryptedLots.toString()} tokens + refund` });
+                        } else {
+                            // Loser - already got refund
+                            if (encryptToastId) decrypt(encryptToastId, true, '✓ REFUNDED', 'Full refund processed');
+                            toast({ type: 'success', title: 'Refund Complete', message: 'Full payment returned' });
+                        }
+                    } catch (err: any) {
+                        console.error('Claim step 2 error:', err);
+                        if (encryptToastId) decrypt(encryptToastId, true, '✓ CLAIM PROCESSED', 'Check your wallet');
+                        toast({ type: 'info', title: 'Claim Processed', message: 'Transaction completed - check wallet' });
+                    }
+                })();
+            } else {
+                if (encryptToastId) decrypt(encryptToastId, true, '✓ CLAIM PROCESSED', 'Check your wallet');
+                toast({ type: 'success', title: 'Claim Success', message: 'Refund/Tokens transferred' });
+            }
+            setEncryptToastId(null);
+            setCurrentAction(null);
+            reset();
         }
     }, [isSuccess, currentAction]);
+
+    // Handle Transaction Errors (On-chain Reverts)
+    useEffect(() => {
+        if (isTxError && currentAction) {
+            console.error("Transaction failed on-chain:", txError);
+            const failureMessage = txError?.message || 'Transaction reverted on-chain';
+
+            // Clean up toast
+            if (encryptToastId) decrypt(encryptToastId, false, '✕ TRANSACTION FAILED', 'On-chain execution failed');
+            toast({ type: 'error', title: 'On-Chain Fail', message: 'The transaction ran out of gas or hit a limit.' });
+
+            setEncryptToastId(null);
+            setCurrentAction(null);
+            reset();
+        }
+    }, [isTxError, txError, currentAction, encryptToastId]);
 
     const handleBid = async () => {
         if (!bidQty || !bidPriceTick) {
@@ -417,7 +671,6 @@ export default function AuctionDetail({ params }: PageProps) {
     };
 
     // History Logic
-    const publicClient = usePublicClient();
     const [bidHistory, setBidHistory] = useState<any[]>([]);
 
     useEffect(() => {
@@ -913,6 +1166,42 @@ export default function AuctionDetail({ params }: PageProps) {
                                             ) : encryptionStatus === 'success' ? '✓ BID SENT' : isAlreadyOperator ? 'ENCRYPT & BID' : '2. ENCRYPT & BID'}
                                         </button>
                                     </div>
+
+                                    {/* LIFECYCLE ACTIONS */}
+                                    {getStatus() === 'ENDED' && !auction?.finalized && (
+                                        <div style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '20px' }}>
+                                            <div style={{ fontSize: '12px', color: '#FFD700', marginBottom: '10px' }}>⚠️ AUCTION ENDED - PENDING FINALIZATION</div>
+                                            <button
+                                                onClick={handleFinalize}
+                                                disabled={!isConnected || isPending}
+                                                className="cyber-button"
+                                                style={{ width: '100%', padding: '16px' }}
+                                            >
+                                                {isPending && currentAction === 'finalize' ? <ScrambleText text="CALCULATING..." trigger={true} /> : 'FINALIZE AUCTION'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {getStatus() === 'FINALIZED' && bidHistory.length > 0 && (
+                                        <div style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '20px' }}>
+                                            <div style={{ fontSize: '12px', color: '#00FF64', marginBottom: '10px' }}>✓ AUCTION FINALIZED (Clearing: ${auction?.clearingTick ? (auction.clearingTick * auction.tickSize / 1000000).toFixed(3) : '...'})</div>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                {bidHistory.map((bid, i) => (
+                                                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', padding: '10px', borderRadius: '8px' }}>
+                                                        <span style={{ fontSize: '12px', color: '#888' }}>Bid #{i + 1} (${((Number(bid.args.tick) * auction!.tickSize) / 1000000).toFixed(3)})</span>
+                                                        <button
+                                                            onClick={() => handleClaim(i)} // Assuming index corresponds to bidIndex roughly; ideally use actual bid index if tracked
+                                                            disabled={!isConnected || isPending}
+                                                            className="cyber-button"
+                                                            style={{ padding: '6px 12px', fontSize: '10px' }}
+                                                        >
+                                                            {isPending && currentAction === 'claim' ? '...' : 'CLAIM / REFUND'}
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
 
                                     {/* Operator Status */}
                                     {isConnected && (

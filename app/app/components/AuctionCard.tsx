@@ -293,10 +293,10 @@ export default function AuctionCard({ id }: { id: number }) {
                             border: highestBidPrice ? '1px solid rgba(255, 215, 0, 0.2)' : 'none'
                         }}>
                             <div style={{ fontSize: '9px', color: highestBidPrice ? 'var(--gold-primary)' : '#666', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                {highestBidPrice ? '🔥 Highest Bid' : 'Starting Price'}
+                                {highestBidPrice ? '🔥 Highest Bid' : 'Floor Price'}
                             </div>
                             <div style={{ fontSize: '14px', color: highestBidPrice ? 'var(--gold-primary)' : '#fff', fontWeight: 'bold' }}>
-                                {highestBidPrice ? `$${highestBidPrice}` : `$${maxPrice}`}
+                                {highestBidPrice ? `$${highestBidPrice}` : `$${minPrice}`}
                             </div>
                         </div>
                     </div>

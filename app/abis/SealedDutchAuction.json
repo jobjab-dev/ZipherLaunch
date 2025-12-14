@@ -7,11 +7,6 @@
           "internalType": "address",
           "name": "_paymentToken",
           "type": "address"
-        },
-        {
-          "internalType": "address",
-          "name": "_gateway",
-          "type": "address"
         }
       ],
       "stateMutability": "nonpayable",
@@ -89,6 +84,75 @@
         }
       ],
       "name": "BidPlaced",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "auctionId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "bidIndex",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint64",
+          "name": "lots",
+          "type": "uint64"
+        }
+      ],
+      "name": "ClaimProcessed",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "auctionId",
+          "type": "uint256"
+        },
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "bidIndex",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "lotsHandle",
+          "type": "uint256"
+        }
+      ],
+      "name": "ClaimReady",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "uint256",
+          "name": "auctionId",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "clearingTickHandle",
+          "type": "uint256"
+        }
+      ],
+      "name": "FinalizeReady",
       "type": "event"
     },
     {
@@ -231,29 +295,10 @@
           "internalType": "uint32",
           "name": "clearingTick",
           "type": "uint32"
-        }
-      ],
-      "stateMutability": "view",
-      "type": "function"
-    },
-    {
-      "inputs": [
-        {
-          "internalType": "uint256",
-          "name": "",
-          "type": "uint256"
-        }
-      ],
-      "name": "claimRequests",
-      "outputs": [
-        {
-          "internalType": "uint256",
-          "name": "auctionId",
-          "type": "uint256"
         },
         {
           "internalType": "uint256",
-          "name": "bidIndex",
+          "name": "clearingTickHandle",
           "type": "uint256"
         }
       ],
@@ -320,29 +365,31 @@
       "inputs": [
         {
           "internalType": "uint256",
-          "name": "",
+          "name": "auctionId",
           "type": "uint256"
-        }
-      ],
-      "name": "finalizeRequests",
-      "outputs": [
+        },
         {
           "internalType": "uint256",
-          "name": "",
+          "name": "bidIndex",
           "type": "uint256"
         }
       ],
-      "stateMutability": "view",
-      "type": "function"
-    },
-    {
-      "inputs": [],
-      "name": "gateway",
+      "name": "getBid",
       "outputs": [
         {
           "internalType": "address",
-          "name": "",
+          "name": "bidder",
           "type": "address"
+        },
+        {
+          "internalType": "uint32",
+          "name": "tick",
+          "type": "uint32"
+        },
+        {
+          "internalType": "bool",
+          "name": "claimed",
+          "type": "bool"
         }
       ],
       "stateMutability": "view",
@@ -352,36 +399,19 @@
       "inputs": [
         {
           "internalType": "uint256",
-          "name": "requestId",
-          "type": "uint256"
-        },
-        {
-          "internalType": "uint256",
-          "name": "decryptedLots",
+          "name": "auctionId",
           "type": "uint256"
         }
       ],
-      "name": "onClaimCallback",
-      "outputs": [],
-      "stateMutability": "nonpayable",
-      "type": "function"
-    },
-    {
-      "inputs": [
+      "name": "getBidCount",
+      "outputs": [
         {
           "internalType": "uint256",
-          "name": "requestId",
-          "type": "uint256"
-        },
-        {
-          "internalType": "uint256",
-          "name": "decryptedTick",
+          "name": "",
           "type": "uint256"
         }
       ],
-      "name": "onFinalizeCallback",
-      "outputs": [],
-      "stateMutability": "nonpayable",
+      "stateMutability": "view",
       "type": "function"
     },
     {
@@ -452,6 +482,47 @@
         }
       ],
       "name": "requestFinalize",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "auctionId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "bidIndex",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint64",
+          "name": "decryptedLots",
+          "type": "uint64"
+        }
+      ],
+      "name": "submitClaimResult",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "auctionId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint32",
+          "name": "clearingTick",
+          "type": "uint32"
+        }
+      ],
+      "name": "submitFinalizeResult",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

@@ -28,14 +28,6 @@ async function main() {
 
     await delay(DELAY_MS);
 
-    // 3. Deploy MockGateway (for testing)
-    console.log("\n3. Deploying MockGateway...");
-    const MockGateway = await ethers.getContractFactory("MockGateway");
-    const gateway = await MockGateway.deploy();
-    await gateway.waitForDeployment();
-    const gatewayAddress = await gateway.getAddress();
-    console.log("MockGateway deployed to:", gatewayAddress);
-
     await delay(DELAY_MS);
 
     // 4. Create a sample ERC20 token via factory
@@ -89,10 +81,10 @@ async function main() {
 
     await delay(DELAY_MS);
 
-    // 8. Deploy SealedDutchAuction with cUSDC as payment token
+    // 8. Deploy SealedDutchAuction with cUSDC as payment token (v0.9 - no gateway needed)
     console.log("\n8. Deploying SealedDutchAuction...");
     const SealedDutchAuction = await ethers.getContractFactory("SealedDutchAuction");
-    const auction = await SealedDutchAuction.deploy(cUSDCAddress, gatewayAddress);
+    const auction = await SealedDutchAuction.deploy(cUSDCAddress);
     await auction.waitForDeployment();
     const auctionAddress = await auction.getAddress();
     console.log("SealedDutchAuction deployed to:", auctionAddress);
@@ -103,7 +95,6 @@ async function main() {
     console.log("=".repeat(50));
     console.log(`NEXT_PUBLIC_TOKEN_FACTORY_ADDRESS=${tokenFactoryAddress}`);
     console.log(`NEXT_PUBLIC_WRAPPER_FACTORY_ADDRESS=${wrapperFactoryAddress}`);
-    console.log(`NEXT_PUBLIC_GATEWAY_ADDRESS=${gatewayAddress}`);
     console.log(`NEXT_PUBLIC_SAMPLE_TOKEN_ADDRESS=${sampleTokenAddress}`);
     console.log(`NEXT_PUBLIC_CSMPL_ADDRESS=${cSMPLAddress}`);
     console.log(`NEXT_PUBLIC_TEST_USDC_ADDRESS=${testUSDCAddress}`);

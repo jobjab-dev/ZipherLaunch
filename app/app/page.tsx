@@ -259,7 +259,7 @@ export default function Home() {
           <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '12px', textDecoration: 'none' }}>
             <div className="logo-wrapper">
               <Image
-                src="/ZipherLaunch_logo.png"
+                src="/Zipherlaunch_logo.png"
                 alt="Logo"
                 width={40}
                 height={40}
