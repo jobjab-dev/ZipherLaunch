@@ -23,6 +23,50 @@ Bind-auction/
 └── package.json        # Monorepo scripts
 ```
 
+### Contract Architecture
+
+```mermaid
+graph TB
+    subgraph Token Layer
+        TF[TokenFactory] --> SE[SimpleERC20]
+        CWF[ConfidentialWrapperFactory] --> CW[ConfidentialWrapper<br/>ERC7984]
+    end
+    
+    subgraph Auction Layer
+        SDA[SealedDutchAuction]
+    end
+    
+    SE -->|wrap| CW
+    CW -->|payment token| SDA
+    CW -->|auction token| SDA
+```
+
+### Auction Flow
+
+```mermaid
+sequenceDiagram
+    participant Seller
+    participant Auction as SealedDutchAuction
+    participant Buyer
+    
+    Note over Seller,Buyer: 1️⃣ CREATE
+    Seller->>Auction: createAuction(token, lots, ticks)
+    
+    Note over Seller,Buyer: 2️⃣ BID
+    Buyer->>Auction: placeBid(tick, encryptedLots)
+    Note right of Auction: tick = public<br/>lots = encrypted (euint64)
+    
+    Note over Seller,Buyer: 3️⃣ FINALIZE
+    Seller->>Auction: requestFinalize()
+    Auction-->>Auction: FHE calculates clearing price
+    Seller->>Auction: submitFinalizeResult(clearingTick)
+    
+    Note over Seller,Buyer: 4️⃣ CLAIM
+    Buyer->>Auction: requestClaim()
+    Buyer->>Auction: submitClaimResult()
+    Auction-->>Buyer: tokens OR refund (encrypted)
+```
+
 ## ⚡ Quick Start
 
 ### Prerequisites
